@@ -1,0 +1,10 @@
+# Python 관련
+__pycache__/
+
+# 가상환경
+venv/
+
+# 로그 및 데이터
+*.csv
+*.json
+*.db
