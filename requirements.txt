@@ -1,2 +1,4 @@
 twscrape
 pandas
+XClientTransaction
+requests
