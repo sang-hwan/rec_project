@@ -1,422 +1,295 @@
-import asyncio  # 비동기 작업을 처리하기 위한 라이브러리
-import json  # JSON 데이터를 읽고 쓰기 위한 라이브러리
-import pandas as pd  # CSV 데이터를 읽고 DataFrame을 다루기 위한 라이브러리
-import requests  # HTTP 요청을 보내기 위한 라이브러리
-from datetime import datetime, timedelta  # 날짜와 시간을 다루기 위한 라이브러리
-from twscrape import API, gather  # 트위터에서 데이터를 수집하기 위한 라이브러리
-from x_client_transaction.utils import generate_headers, handle_x_migration, get_ondemand_file_url  # X 헤더 생성 도구
-from x_client_transaction import ClientTransaction  # 트랜잭션 ID를 동적으로 생성하는 클래스
-import re
-from collections import Counter
-import subprocess
-import bs4
-import sqlite3
+import asyncio  # 비동기 작업을 위한 표준 라이브러리
+import json       # JSON 파싱/생성을 위한 표준 라이브러리
+import pandas as pd  # CSV 파일 입출력 및 DataFrame 처리를 위한 라이브러리
+import requests   # HTTP 요청을 보내기 위한 라이브러리
+from datetime import datetime, timedelta, timezone  # 날짜 연산을 위한 표준 라이브러리
+from twscrape import API, gather  # twscrape API 객체 및 결과 수집 헬퍼
+from x_client_transaction.utils import generate_headers, handle_x_migration, get_ondemand_file_url  # X 트랜잭션 ID 생성 유틸
+from x_client_transaction import ClientTransaction  # 트랜잭션 ID를 생성하는 클래스
+import re  # 정규표현식 처리용 표준 라이브러리
+from collections import Counter  # 단어 빈도 계산용 컨테이너
+import subprocess  # 외부 CLI 명령 실행용 표준 라이브러리
+import bs4  # HTML 파싱용 BeautifulSoup 라이브러리
+import sqlite3  # SQLite DB 연결을 위한 표준 라이브러리
+import traceback  # 예외 발생 시 전체 스택 트레이스 출력
+from typing import Dict, List, Tuple, Any  # 타입 힌트
 
-# 사용자 정의 예외 클래스 (계정 업데이트 필요 시 발생)
-class AccountUpdateRequired(Exception):
-    pass
+# -------------------------------
+# 설정 상수
+# -------------------------------
+DB_FILE: str = 'accounts.db'                 # twscrape가 기본으로 사용하는 DB 파일
+JSON_ACCOUNT_FILE: str = 'accounts.json'     # 로컬 JSON 계정 파일 경로
+FOLLOWING_CSV: str = 'following_list.csv'    # 수집 대상 계정 목록 CSV
 
+# -------------------------------
 # JSON 계정 정보 로드
-def load_json_accounts(account_file='accounts.json'):
+# -------------------------------
+def load_json_accounts(account_file: str = JSON_ACCOUNT_FILE) -> Dict[str, Dict[str, Any]]:
     try:
-        print(f"[DEBUG] 파일 열기 시도: {account_file}")
-        with open(account_file, 'r') as f:  # 파일 열기
-            data = json.load(f)  # JSON 데이터를 딕셔너리로 로드
-        print("[DEBUG] 파일 로드 성공")
-        
+        print(f"[DEBUG] Loading JSON accounts from {account_file}")
+        with open(account_file, 'r') as f:
+            data: Any = json.load(f)
         if 'x' not in data:
-            raise KeyError("'x' 키가 JSON 데이터에 없습니다.")
-        accounts = data['x']
-        
-        # 모든 계정에 대해 쿠키가 dict 형태라면 문자열로 변환
-        print(f"[DEBUG] 계정 데이터 처리 시작: {len(accounts)}개 계정")
-        for account_name, account_info in accounts.items():
-            print(f"[DEBUG] 계정 처리 중: {account_name}")
-            cookies = account_info.get('cookies', {})
+            raise KeyError("'x' key missing in JSON file")
+        accounts: Dict[str, Dict[str, Any]] = data['x']
+        for name, info in accounts.items():
+            cookies = info.get('cookies', {})
             if isinstance(cookies, dict):
-                # key=value 형태의 문자열 리스트로 변환한 후 '; '로 연결
-                cookie_str = '; '.join(f"{key}={value}" for key, value in cookies.items())
-                account_info['cookies'] = cookie_str
-                print(f"[DEBUG] 쿠키 변환 완료: {cookie_str}")
-                
-        print("[DEBUG] 계정 데이터 처리 완료")
-        return accounts  # 로드된 계정 정보 반환
-    
-    except FileNotFoundError as e:
-        print(f"[ERROR] 파일을 찾을 수 없습니다: {account_file}")
-        raise e
-    except json.JSONDecodeError as e:
-        print(f"[ERROR] JSON 데이터 파싱 오류: {e}")
-        raise e
-    except KeyError as e:
-        print(f"[ERROR] 필요한 키가 누락되었습니다: {e}")
-        raise e
+                info['cookies'] = '; '.join(f"{k}={v}" for k, v in cookies.items())
+        print(f"[DEBUG] Loaded {len(accounts)} accounts from JSON")
+        return accounts
     except Exception as e:
-        print(f"[ERROR] 알 수 없는 오류가 발생했습니다: {e}")
-        raise e
+        print(f"[ERROR] Failed to load JSON accounts: {e}")
+        traceback.print_exc()
+        raise
 
+# -------------------------------
 # DB 계정 정보 로드
-def load_db_accounts(db_file='accounts.db'):
+# -------------------------------
+def load_db_accounts(db_file: str = DB_FILE) -> Dict[str, Dict[str, str]]:
     try:
-        print(f"[DEBUG] DB 연결 시도: {db_file}")
+        print(f"[DEBUG] Connecting to DB: {db_file}")
         conn = sqlite3.connect(db_file)
-        cursor = conn.cursor()
-        
-        query = "SELECT username, cookies FROM accounts"
-        print(f"[DEBUG] SQL 쿼리 실행: {query}")
-        cursor.execute(query)
-
-        rows = cursor.fetchall()
-        print(f"[DEBUG] DB 조회 완료, 가져온 행 개수: {len(rows)}")
-
-        db_accounts = {}
-        for idx, (username, cookies) in enumerate(rows, 1):
-            print(f"[DEBUG] 처리 중인 행 {idx}: username={username}, cookies={cookies}")
-            
-            # JSON 형태의 쿠키 문자열을 dict로 파싱 후 문자열 형태로 변환
-            try:
-                cookie_dict = json.loads(cookies)
-                cookie_str = '; '.join(f"{key}={value}" for key, value in cookie_dict.items())
-            except json.JSONDecodeError:
-                print("[WARNING] 쿠키가 이미 문자열 형태입니다.")
-                cookie_str = cookies  # 이미 문자열 형태인 경우 그대로 사용
-
-            db_accounts[username] = {
-                'id': username,
-                'cookies': cookie_str
-            }
-
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounts';")
+        if not cur.fetchone():
+            raise sqlite3.OperationalError("Table 'accounts' does not exist")
+        cur.execute("SELECT username, cookies FROM accounts")
+        rows: List[Tuple[str, str]] = cur.fetchall()
         conn.close()
-        print("[DEBUG] DB 연결 종료")
-
-        return db_accounts
-
-    except sqlite3.OperationalError as e:
-        print(f"[ERROR] SQLite 작업 오류 발생: {e}")
-        raise e
-    except sqlite3.DatabaseError as e:
-        print(f"[ERROR] SQLite DB 오류 발생: {e}")
-        raise e
-    except FileNotFoundError as e:
-        print(f"[ERROR] DB 파일이 존재하지 않음: {db_file}")
-        raise e
+        result: Dict[str, Dict[str, str]] = {}
+        for username, cookies in rows:
+            try:
+                cd: Any = json.loads(cookies)
+                cookie_str: str = '; '.join(f"{k}={v}" for k, v in cd.items())
+            except json.JSONDecodeError:
+                cookie_str = cookies
+            result[username] = {'id': username, 'cookies': cookie_str}
+        return result
     except Exception as e:
-        print(f"[ERROR] 알 수 없는 오류 발생 (load_db_accounts): {e}")
-        raise e
+        print(f"[ERROR] load_db_accounts failed: {e}")
+        traceback.print_exc()
+        raise
 
-# 계정 정보 비교
-def compare_accounts(json_accounts, db_accounts):
-    updates_needed = {}
-
-    for username, json_acc in json_accounts.items():
-        db_acc = db_accounts.get(json_acc['id'])
-        
-        if not db_acc:
-            print(f"[DEBUG] 새로 추가할 계정 발견: {json_acc['id']}")
-            updates_needed[json_acc['id']] = json_acc
-            continue
-        
-        if json_acc['cookies'] != db_acc['cookies']:
-            print(f"[DEBUG] 쿠키가 변경된 계정 발견: {json_acc['id']}")
-            updates_needed[json_acc['id']] = json_acc
-    
-    if updates_needed:
-        raise AccountUpdateRequired(f"업데이트가 필요한 계정 발견: {list(updates_needed.keys())}")
-
-# 로그인 안된 계정 찾는 함수
-async def get_logged_out_accounts():
+# 안전하게 DB 로드, 실패 시 빈 dict
+def safe_load_db_accounts() -> Dict[str, Dict[str, str]]:
     try:
-        print("[DEBUG] twscrape accounts 명령어 실행 시작")
-        # CLI 명령어 실행
+        return load_db_accounts()
+    except Exception:
+        print("[WARNING] Returning empty DB accounts due to error")
+        return {}
+
+# -------------------------------
+# JSON vs DB 계정 비교
+# -------------------------------
+def diff_accounts(
+    json_accounts: Dict[str, Dict[str, Any]],
+    db_accounts: Dict[str, Dict[str, str]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    to_add: List[Dict[str, Any]] = []
+    to_update: List[Dict[str, Any]] = []
+    try:
+        for acc in json_accounts.values():
+            db_acc = db_accounts.get(acc['id'])
+            if not db_acc:
+                to_add.append(acc)
+            elif acc['cookies'] != db_acc['cookies']:
+                to_update.append(acc)
+        print(f"[DEBUG] diff: to_add={len(to_add)}, to_update={len(to_update)}")
+        return to_add, to_update
+    except Exception as e:
+        print(f"[ERROR] diff_accounts failed: {e}")
+        traceback.print_exc()
+        raise
+
+# -------------------------------
+# 계정 등록 및 로그인 처리
+# -------------------------------
+async def register_and_login_accounts(
+    api: API,
+    accounts: Dict[str, Dict[str, Any]]
+) -> None:
+    try:
+        print("[DEBUG] Loading existing DB accounts...")
+        db_accounts = safe_load_db_accounts()
+        to_add, to_update = diff_accounts(accounts, db_accounts)
+        for acc in to_add + to_update:
+            try:
+                print(f"[DEBUG] add_account: {acc['id']}")
+                await api.pool.add_account(
+                    acc['id'], acc.get('pw'), acc.get('email'), acc.get('email_pw'), cookies=acc['cookies']
+                )
+            except Exception as e:
+                print(f"[ERROR] add_account failed for {acc['id']}: {e}")
+                traceback.print_exc()
+        print("[DEBUG] Checking logged-out accounts via CLI")
         result = subprocess.run(['twscrape', 'accounts'], capture_output=True, text=True)
-        print("[DEBUG] 명령어 실행 완료")
-
-        # 결과를 줄 단위로 나누기
-        lines = result.stdout.strip().split('\n')
-        if len(lines) <= 1:
-            raise ValueError("계정 상태 정보가 없습니다.")
-
-        # 첫 번째 라인은 헤더이므로 제외하고 데이터 파싱
-        accounts_status = lines[1:]
-        logged_out_accounts = []
-
-        for line in accounts_status:
-            print(f"[DEBUG] 계정 상태 파싱 중: {line}")
-            parts = line.split()
-            if len(parts) < 2:
-                raise ValueError(f"잘못된 계정 상태 포맷: {line}")
-
-            username = parts[0]
-            logged_in = parts[1]
-
-            # logged_in 값이 0인 경우 로그인되지 않은 상태
-            if logged_in == '0':
-                logged_out_accounts.append(username)
-                print(f"[DEBUG] 로그인되지 않은 계정 발견: {username}")
-
-        print(f"[DEBUG] 로그인되지 않은 계정 목록 생성 완료: {logged_out_accounts}")
-        return logged_out_accounts
-
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] subprocess 실행 오류 발생: {e}")
-        raise e
-    except ValueError as e:
-        print(f"[ERROR] 데이터 파싱 오류 발생: {e}")
-        raise e
-    except Exception as e:
-        print(f"[ERROR] 알 수 없는 오류가 발생했습니다: {e}")
-        raise e
-
-# X-Client-Transaction-ID를 동적으로 생성하여 반환하는 함수
-def generate_transaction_id():
-    try:
-        print("[DEBUG] 세션 초기화 및 헤더 설정 시작")
-        # HTTP 요청을 보내고 응답을 받을 때 세션을 유지하기 위한 객체 생성
-        session = requests.Session()
-        # 웹 브라우저와 유사한 요청 헤더를 설정하여, 실제 사용자 요청처럼 보이게 만듦
-        session.headers = generate_headers()
-        
-        print("[DEBUG] X.com 메인 페이지 로딩 시작")
-        # X.com 웹사이트의 메인 페이지를 불러와 초기 세션과 쿠키를 확보
-        home_page_response = handle_x_migration(session=session)
-        print("[DEBUG] 메인 페이지 로딩 완료")
-        
-        print("[DEBUG] ondemand 파일 URL 추출 시작")
-        # 초기 페이지 HTML에서 특정 JavaScript 파일(ondemand.s)의 URL을 추출
-        ondemand_file_url = get_ondemand_file_url(home_page_response)
-        print(f"[DEBUG] ondemand 파일 URL 추출 완료: {ondemand_file_url}")
-        
-        print("[DEBUG] ondemand 파일 다운로드 시작")
-        # 추출된 URL에서 해당 JavaScript 파일을 다운로드
-        ondemand_file = session.get(url=ondemand_file_url)
-        print("[DEBUG] ondemand 파일 다운로드 완료")
-        
-        print("[DEBUG] ondemand 파일 파싱 시작")
-        ondemand_soup = bs4.BeautifulSoup(ondemand_file.content, 'html.parser')
-        print("[DEBUG] ondemand 파일 파싱 완료")
-        
-        print("[DEBUG] ClientTransaction 객체 초기화 시작")
-        # 위의 메인 페이지 응답과 다운로드한 파일 내용을 기반으로,
-        # 트위터가 요구하는 특수한 헤더(X-Client-Transaction-ID)를 생성하는 객체 초기화
-        ct = ClientTransaction(home_page_response, ondemand_soup)
-        print("[DEBUG] ClientTransaction 객체 초기화 완료")
-        
-        # 지정된 API 경로와 HTTP 메서드(POST)에 맞는 고유 트랜잭션 ID를 생성하여 반환
-        transaction_id = ct.generate_transaction_id(method="POST", path="/1.1/onboarding/task.json")
-        print(f"[DEBUG] 트랜잭션 ID 생성 완료: {transaction_id}")
-        
-        return transaction_id
-    
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] HTTP 요청 중 오류 발생: {e}")
-        raise e
-    except AttributeError as e:
-        print(f"[ERROR] HTML 파싱 중 필요한 요소가 없습니다: {e}")
-        raise e
-    except Exception as e:
-        print(f"[ERROR] 알 수 없는 오류가 발생했습니다: {e}")
-        raise e
-
-# 로그인 상태를 체크하고, 필요하면 로그인하는 비동기 함수
-async def ensure_accounts_logged_in_with_cookies(api, accounts):
-    try:
-        print("[DEBUG] 계정 추가 시작")
-        # accounts 딕셔너리에서 각 계정을 추가(쿠키 기반)
-        for key, acc in accounts.items():
-            print(f"[DEBUG] 계정 추가 중: {acc['id']}")
-            await api.pool.add_account(
-                acc['id'], acc['pw'], acc['email'], acc['email_pw'], cookies=acc['cookies']
-            )
-        print("[DEBUG] 계정 추가 완료")
-
-        print("[DEBUG] 로그인 상태 확인 시작")
-        # 현재 계정의 상태 확인 (로그인 여부)
-        logged_out_accounts = await get_logged_out_accounts()
-        print(f"[DEBUG] 초기 로그인되지 않은 계정: {logged_out_accounts}")
-        
-        if not logged_out_accounts:
-            print("✅ 모든 계정이 이미 로그인 상태입니다.")
+        lines = result.stdout.strip().split('\n')[1:]
+        logged_out = [l.split()[0] for l in lines if len(l.split())>1 and l.split()[1]=='0']
+        if not logged_out:
+            print("✅ All accounts are active")
             return
-
-        if len(logged_out_accounts) == len(accounts):
-            # 모든 계정이 로그아웃 상태인 경우 전체 로그인 시도
-            print("🔑 모든 계정이 로그아웃 상태입니다. 전체 계정 로그인 수행 중...")
+        if len(logged_out) == len(accounts):
             await api.pool.login_all()
         else:
-            # 일부 계정만 로그아웃 상태인 경우 선택적 개별 로그인
-            print(f"🔄 {len(logged_out_accounts)}개 계정이 로그아웃 상태입니다. 개별 재로그인 수행 중...")
-            for username in logged_out_accounts:
-                print(f"[DEBUG] 재로그인 수행 중: {username}")
-                await api.pool.relogin(username)
-                
-        print("[DEBUG] 최종 로그인 상태 재확인")
-        # 최종 상태 재확인 (문자열 리스트로 다시 받음)
-        final_logged_out_accounts = await get_logged_out_accounts()
-        print(f"[DEBUG] 최종 로그인되지 않은 계정: {final_logged_out_accounts}")
-        
-        if final_logged_out_accounts:
-            print(f"⚠️ 다음 계정들은 로그인에 실패했습니다: {final_logged_out_accounts}")
-        else:
-            print("✅ 모든 계정 로그인 성공!")
-    
+            for u in logged_out:
+                try:
+                    await api.pool.relogin(u)
+                except Exception:
+                    print(f"[ERROR] relogin failed for {u}")
     except Exception as e:
-        print(f"[ERROR] 계정 로그인 처리 중 오류 발생: {e}")
-        raise e
-        
-# 트윗 본문에서 핵심 키워드를 추출하여 미디어 설명 생성하는 함수
-def generate_assumptive_description(tweet_text, media_type):
+        print(f"[ERROR] register_and_login_accounts failed: {e}")
+        traceback.print_exc()
+        raise
+
+# -------------------------------
+# X-Client-Transaction-ID 생성
+# -------------------------------
+def generate_transaction_id() -> str:
     try:
-        print(f"[DEBUG] 트윗 본문 분석 시작: {tweet_text[:30]}...")
-        
-        # 영문과 한글 단어 모두 포함, 빈도 높은 단어 추출
-        words = re.findall(r'\b[가-힣a-zA-Z0-9]+\b', tweet_text)
-        print(f"[DEBUG] 추출된 단어 목록: {words}")
-        
+        session = requests.Session()
+        session.headers = generate_headers()
+        resp = handle_x_migration(session=session)
+        ondemand_url = get_ondemand_file_url(resp)
+        ondemand = session.get(ondemand_url)
+        soup = bs4.BeautifulSoup(ondemand.content, 'html.parser')
+        ct = ClientTransaction(resp, soup)
+        tid: str = ct.generate_transaction_id(method="POST", path="/1.1/onboarding/task.json")
+        return tid
+    except Exception as e:
+        print(f"[ERROR] generate_transaction_id failed: {e}")
+        traceback.print_exc()
+        raise
+
+# -------------------------------
+# 미디어 설명 생성
+# -------------------------------
+def generate_assumptive_description(text: str, media_type: str) -> str:
+    try:
+        words = re.findall(r'\b[가-힣a-zA-Z0-9]+\b', text)
         if not words:
-            raise ValueError("트윗 본문에서 키워드를 추출할 수 없습니다.")
-        
-        most_common_words = [word for word, count in Counter(words).most_common(3)]
-        print(f"[DEBUG] 가장 빈도가 높은 단어: {most_common_words}")
-        
-        keywords = ', '.join(most_common_words)
-        if media_type == "image":
-            description = f"트윗 본문과 관련된 이미지 (키워드: {keywords} 관련 이미지로 추정됨)"
-        elif media_type == "video":
-            description = f"트윗 본문과 관련된 영상 (키워드: {keywords} 관련 영상으로 추정됨)"
-        else:
-            description = "트윗 본문과 관련된 미디어 (정확한 유형 미확인)"
-        
-        print(f"[DEBUG] 생성된 미디어 설명: {description}")
-        return description
-    
-    except ValueError as e:
-        print(f"[ERROR] 키워드 추출 오류: {e}")
-        raise e
+            raise ValueError("No keywords extracted")
+        top3 = [w for w,_ in Counter(words).most_common(3)]
+        kw = ', '.join(top3)
+        return {
+            'image': f"관련 이미지 (키워드: {kw})",
+            'video': f"관련 영상 (키워드: {kw})"
+        }.get(media_type, "관련 미디어")
     except Exception as e:
-        print(f"[ERROR] 알 수 없는 오류가 발생했습니다: {e}")
-        raise e
+        print(f"[ERROR] generate_assumptive_description failed: {e}")
+        traceback.print_exc()
+        raise
 
-# 특정 계정에서 특정 기간 동안 트윗을 수집하는 비동기 함수 (모든 트윗 유형 포함)
-async def collect_tweets(api, target_account, start_time, end_time, daily_limit=50):
+# -------------------------------
+# 트윗 수집
+# -------------------------------
+async def collect_tweets(
+    api: API,
+    account: str,
+    start_time: datetime,
+    end_time: datetime,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
     try:
-        print(f"[DEBUG] 사용자 정보 조회 시작: {target_account}")
-        user_handle = target_account.replace('@', '')
-        user = await api.user_by_login(user_handle) # 사용자 정보 조회
-        print(f"[DEBUG] 사용자 정보 조회 완료: {user.username} (ID: {user.id})")
-        
-        print(f"[DEBUG] 트윗 수집 시작: {target_account}, 수집 제한: {daily_limit}")
-        tweets = await gather(api.user_tweets(user.id, limit=daily_limit))
-        print(f"[DEBUG] 트윗 수집 완료, 수집된 트윗 개수: {len(tweets)}")
+        print(f"[DEBUG] ► 로그인한 사용자로부터 정보 조회 시작: {account}")
+        user = await api.user_by_login(account.lstrip('@'))
+        tweets = await gather(api.user_tweets(user.id, limit=limit))
+        print(f"[DEBUG] ► {account}: 총 {len(tweets)}개의 트윗을 API로부터 수신")
+        output: List[Dict[str, Any]] = []
+        for idx, tw in enumerate(tweets, 1):
+            snippet = tw.rawContent[:50].replace('\n', ' ')
+            print(f"[TRACE] {account} 트윗 #{idx}: id={tw.id}, \"{snippet}...\"")
+            if start_time <= tw.date <= end_time:
+                # tw.media가 None / 단일 객체 / 리스트인 경우 모두 처리
+                media_items = tw.media
+                if media_items is None:
+                    media_iter = []
+                elif isinstance(media_items, (list, tuple)):
+                    media_iter = media_items
+                else:
+                    media_iter = [media_items]
+                media_list: List[Dict[str, Any]] = []
+                for m in media_iter:
+                    # URL 뽑아내기
+                    url = (
+                        getattr(m, 'url', None)
+                        or getattr(m, 'media_url', None)
+                        or getattr(m, 'preview_url', None)
+                        or getattr(m, 'display_url', None)
+                    )
+                    # 타입 판단
+                    cls = m.__class__.__name__.lower()
+                    if 'photo' in cls or 'image' in cls:
+                        mt = 'image'
+                    elif 'video' in cls or 'gif' in cls:
+                        mt = 'video'
+                    else:
+                        mt = 'other'
 
-        collected_tweets = []  # 수집된 트윗을 저장할 리스트
-
-        for tweet in tweets:
-            print(f"[DEBUG] 트윗 날짜 체크: {tweet.date}")
-            if start_time <= tweet.date <= end_time: # 지정한 날짜 범위 내 트윗만 수집
-                print(f"[DEBUG] 트윗 날짜 범위 내 포함됨: {tweet.date}")
-                media_contents = []
-                
-                if tweet.media:
-                    print(f"[DEBUG] 미디어 콘텐츠 처리 시작: 미디어 개수 {len(tweet.media)}")
-                    for media in tweet.media:
-                        media_type = "image" if media.type == "photo" else "video" if media.type == "video" else "other"
-                        media_contents.append({
-                            "type": media_type,
-                            "url": media.url,
-                            "description": generate_assumptive_description(tweet.rawContent, media_type)
-                        })
-                    print(f"[DEBUG] 미디어 콘텐츠 처리 완료")
-
-                tweet_data = {
-                    'tweet_id': tweet.id,
-                    'user_id': tweet.user.id,
-                    'username': tweet.user.username,
-                    'content': tweet.rawContent,
-                    'created_at': tweet.date.strftime("%Y-%m-%d %H:%M:%S"),
-                    'retweets': tweet.retweetCount,
-                    'likes': tweet.likeCount,
-                    'replies': tweet.replyCount,
-                    'quotes': tweet.quoteCount,
-                    'url': tweet.url,
-                    'media_contents': media_contents,
+                    media_list.append({
+                        'type': mt,
+                        'url': url,
+                        'description': generate_assumptive_description(tw.rawContent, mt)
+                    })
+                output.append({
+                    'tweet_id': tw.id,
+                    'username': tw.user.username,
+                    'content': tw.rawContent,
+                    'created_at': tw.date.strftime("%Y-%m-%d %H:%M:%S"),
+                    'media_contents': media_list,
                     'scraped_at': datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                }
-
-                collected_tweets.append(tweet_data) # 트윗 데이터를 리스트에 추가
-                
-        print(f"[DEBUG] 최종 수집된 트윗 개수: {len(collected_tweets)}")
-        
-        # 요청 간격을 충분히 확보 (최소 10초)
-        print(f"{target_account} 트윗 수집 완료. 다음 요청을 위해 10초 대기합니다.")
+                })
+        print(f"[DEBUG] ► {account}: 날짜 필터링 후 {len(output)}개의 트윗이 최종 포함됨")
         await asyncio.sleep(10)
+        return output
 
-        return collected_tweets
-    
     except Exception as e:
-        print(f"[ERROR] 트윗 수집 중 오류 발생 ({target_account}): {e}")
-        raise e
+        print(f"[ERROR] collect_tweets failed for {account}: {e}")
+        traceback.print_exc()
+        # 빈 리스트가 아니라 에러를 그대로 던져서 상위에서 중단하게 만듭니다
+        raise
 
-# 메인 실행 함수
-async def main():
+# -------------------------------
+# 트윗 수집 실행 및 저장
+# -------------------------------
+async def run_tweet_collection(api: API) -> None:
+    df = pd.read_csv(FOLLOWING_CSV)
+    accounts = df['account_id'].tolist()
+
+    # UTC 타임존 정보까지 포함한 aware datetime 으로 생성
+    end   = datetime.now(timezone.utc)
+    start = end - timedelta(days=1)
+    print(f"[INFO] 전체 수집 시작: from {start.isoformat()} to {end.isoformat()}")
+
+    all_tweets: List[Dict[str, Any]] = []
+    for acc in accounts:
+        print(f"[INFO] ■ {acc} 의 트윗 수집 시작")
+        try:
+            tweets = await collect_tweets(api, acc, start, end)
+        except Exception:
+            print(f"[ERROR] ■ {acc} 수집 중 치명적 에러 발생 — 전체 프로세스 중단")
+            raise
+        all_tweets.extend(tweets)
+        print(f"[INFO] ■ {acc} 완료 — 누적 수집 트윗 수: {len(all_tweets)}")
+
+    filename = f"collected_{end.strftime('%Y%m%d%H%M')}.json"
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(all_tweets, f, ensure_ascii=False, indent=2)
+        print(f"[INFO] 모든 수집 완료: 총 {len(all_tweets)}개의 트윗을 '{filename}'에 저장")
+
+# -------------------------------
+# 메인 진입점
+# -------------------------------
+async def main() -> None:
     try:
-        print("[DEBUG] 계정 정보 로드 시작")
-        accounts = load_json_accounts()  # json 계정 정보 로드
-        print(f"[DEBUG] 계정 정보 로드 완료: {len(accounts)}개의 계정")
-                
-        db_accounts = load_db_accounts() # DB 계정 정보 로드
-        # 계정 정보 비교 후 업데이트 필요 여부 확인
-        compare_accounts(accounts, db_accounts)
-        
-        print("[DEBUG] API 객체 생성")
-        api = API()  # 트윗 수집 API 객체 생성
-
-        print("[DEBUG] 계정 로그인 상태 체크 및 로그인 수행 시작")
-        # 로그인 상태 체크 및 로그인 수행
-        await ensure_accounts_logged_in_with_cookies(api, accounts)
-        print("[DEBUG] 로그인 상태 체크 및 로그인 완료")
-
-        print("[DEBUG] 동적 헤더 생성 및 추가 시작")
-        # 동적 헤더 생성 및 추가
-        # X-Client-Transaction-ID는 자동화 탐지 회피를 위한 고유 식별자이며, 매 요청마다 동적으로 생성하지 않으면 밴 위험이 커질 수 있음
-        transaction_id = generate_transaction_id()
-        api.headers["x-client-transaction-id"] = transaction_id
-        print(f"[DEBUG] 동적 헤더 생성 완료: {transaction_id}")
-
-        print("[DEBUG] 계정 목록 로드 시작")
-        following_df = pd.read_csv('following_list.csv')  # CSV 파일에서 계정 목록 로드
-        target_accounts = following_df['account_id'].tolist()  # DataFrame에서 계정 리스트로 변환
-        print(f"[DEBUG] 계정 목록 로드 완료: 총 {len(target_accounts)}개 계정")
-
-        end_time = datetime.utcnow()  # 수집 종료 시간
-        start_time = end_time - timedelta(days=1)  # 수집 시작 시간 (하루 전)
-
-        all_tweets = []  # 모든 트윗을 저장할 리스트
-
-        for idx, account in enumerate(target_accounts):  # 모든 계정을 순회
-            print(f"[{idx+1}/{len(target_accounts)}] Collecting tweets from {account}...")
-            tweets = await collect_tweets(api, account, start_time, end_time)  # 트윗 수집
-            all_tweets.extend(tweets)  # 결과 리스트에 추가
-
-        # 최종 수집된 트윗을 JSON 파일로 저장
-        if all_tweets:
-            filename = f'collected_tweets_{end_time.strftime("%Y%m%d%H%M")}.json'
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(all_tweets, f, ensure_ascii=False, indent=2)
-
-            print(f"\n총 {len(all_tweets)}개의 트윗을 '{filename}'에 저장했습니다.")
-        else:
-            print("수집된 트윗이 없습니다.")
-    
-    except FileNotFoundError as e:
-        print(f"[ERROR] 파일을 찾을 수 없습니다: {e}")
-        raise e
-    except pd.errors.EmptyDataError as e:
-        print(f"[ERROR] CSV 파일에 데이터가 없습니다: {e}")
-        raise e
+        accounts = load_json_accounts()
+        api = API()
+        await register_and_login_accounts(api, accounts)
+        # api.headers['x-client-transaction-id'] = generate_transaction_id()
+        await run_tweet_collection(api)
     except Exception as e:
-        print(f"[ERROR] 메인 실행 중 알 수 없는 오류 발생: {e}")
-        raise e
+        print(f"[ERROR] main failed: {e}")
+        traceback.print_exc()
 
-# 비동기 메인 함수 실행
 if __name__ == '__main__':
-    asyncio.run(main())
+    asyncio.run(main())  # Python 3.7+에서 비동기 함수 실행
