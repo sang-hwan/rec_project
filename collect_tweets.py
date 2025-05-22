@@ -4,6 +4,7 @@ import pandas as pd  # CSV 파일 입출력 및 DataFrame 처리를 위한 라�
 import requests   # HTTP 요청을 보내기 위한 라이브러리
 from datetime import datetime, timedelta, timezone  # 날짜 연산을 위한 표준 라이브러리
 from twscrape import API, gather  # twscrape API 객체 및 결과 수집 헬퍼
+from twscrape.models import MediaPhoto, MediaVideo, MediaAnimated # twscrape 라이브러리의 Media 클래스
 from x_client_transaction.utils import generate_headers, handle_x_migration, get_ondemand_file_url  # X 트랜잭션 ID 생성 유틸
 from x_client_transaction import ClientTransaction  # 트랜잭션 ID를 생성하는 클래스
 import re  # 정규표현식 처리용 표준 라이브러리
@@ -199,7 +200,7 @@ def generate_assumptive_description(text: str, media_type: str) -> str:
     try:
         words = re.findall(r'\b[가-힣a-zA-Z0-9]+\b', text)
         if not words:
-            raise ValueError("No keywords extracted")
+            return f"관련 {media_type}"
         top3 = [w for w,_ in Counter(words).most_common(3)]
         kw = ', '.join(top3)
         return {
@@ -207,9 +208,9 @@ def generate_assumptive_description(text: str, media_type: str) -> str:
             'video': f"관련 영상 (키워드: {kw})"
         }.get(media_type, "관련 미디어")
     except Exception as e:
+        # 안전하게 기본 문자열 반환
         print(f"[ERROR] generate_assumptive_description failed: {e}")
-        traceback.print_exc()
-        raise
+        return f"관련 {media_type}"
 
 # -------------------------------
 # 트윗 수집
@@ -231,63 +232,71 @@ async def collect_tweets(
         for idx, tw in enumerate(tweets, 1):
             snippet = tw.rawContent[:50].replace('\n', ' ')
             print(f"[TRACE] {account} 트윗 #{idx}: id={tw.id}, \"{snippet}...\"")
+            if tw.rawContent.startswith("RT @"):
+                print(f"[DEBUG] ▶ 수동 RT 감지, 스킵: id={tw.id}")
+                continue
             if start_time <= tw.date <= end_time:
-                # 중복 키 결정 & 스킵
-                is_rt = getattr(tw, 'is_retweet', False) or getattr(tw, 'retweeted', False)
-                key_id = (tw.retweeted_status.id if is_rt and getattr(tw, 'retweeted_status', None) else tw.id)
+                # 리트윗(native) 여부 판정
+                is_rt = getattr(tw, 'retweetedTweet', None) is not None
+                # 중복 키는 항상 원본 ID
+                original_tweet = tw.retweetedTweet if is_rt else tw
+                key_id = original_tweet.id
+                # 이미 처리된 ID라면 스킵
                 if key_id in seen_ids:
-                    continue
+                    # 리트윗이 먼저 왔을 경우, 원본 레코드를 지우고 이어서 리트윗 기록
+                    if is_rt:
+                        output = [o for o in output if o['tweet_id'] != key_id]
+                    else:
+                        # 원본이 이미 남아 있으면 중복 스킵
+                        continue
                 seen_ids.add(key_id)
-                # 트윗이 리트윗이라면 원문 트윗 객체에서 media, content, original_author를 가져오고
-                # 그렇지 않다면 자신(tw)에서 그대로 가져옵니다.
-                if is_rt and getattr(tw, 'retweeted_status', None):
-                    original      = tw.retweeted_status
-                    media_items   = original.media
-                    actual_user   = account.lstrip('@')       # 리트윗한 사람
-                    original_user = original.user.username    # 원저자
-                    content       = original.rawContent
-                else:
-                    media_items   = tw.media
-                    actual_user   = account.lstrip('@')       # 본인 계정
-                    original_user = tw.user.username          # 본인(원저자)
-                    content       = tw.rawContent
-                # media_items → iterable한 리스트로 변환
-                if media_items is None:
-                    media_iter = []
-                elif isinstance(media_items, (list, tuple)):
-                    media_iter = media_items
-                else:
-                    media_iter = [media_items]
+                # 출력용 데이터 결정
+                tweet_id      = original_tweet.id
+                actual_user   = account.lstrip('@')          # 리트윗한 사람
+                original_user = original_tweet.user.username # 원저자
+                content       = original_tweet.rawContent
+                # twscrape.models.Media 객체에서 실제 미디어 아이템만 펼치기
+                # Media.photos, Media.videos, Media.animated 모두 리스트
+                media_model = original_tweet.media
+                media_iter: List[Any] = []
+                if media_model:
+                    media_iter.extend(media_model.photos)
+                    media_iter.extend(media_model.videos)
+                    media_iter.extend(media_model.animated)
                 media_list: List[Dict[str, Any]] = []
                 for m in media_iter:
-                    ## 미디어 URL 추출 강화
-                    url = (
-                        getattr(m, 'media_url_https', None) or
-                        getattr(m, 'url', None) or
-                        getattr(m, 'media_url', None) or
-                        getattr(m, 'preview_url', None) or
-                        getattr(m, 'display_url', None) or
-                        # 동영상 variants가 있을 경우 가장 첫 variant URL
-                        (m.variants[0].url
-                        if getattr(m, 'variants', None) and m.variants
-                        else None)
-                    )
-                    # 타입 판단
-                    cls = m.__class__.__name__.lower()
-                    if 'photo' in cls or 'image' in cls:
-                        mt = 'image'
-                    elif 'video' in cls or 'gif' in cls:
+                    # MediaPhoto, MediaVideo, MediaAnimated 클래스별 URL & 타입 추출
+                    if isinstance(m, MediaPhoto):
+                        url = m.url
+                        mt  = 'image'
+                    elif isinstance(m, MediaVideo):
+                        # variants 리스트에서 bitrate 최대 아이템 선택
+                        if m.variants:
+                            best = max(m.variants, key=lambda v: v.bitrate)
+                            url  = best.url
+                        else:
+                            url = None
                         mt = 'video'
+                    elif isinstance(m, MediaAnimated):
+                        url = m.videoUrl
+                        mt  = 'video'
                     else:
-                        mt = 'other'
+                        url = None
+                        mt  = 'other'
+                    # 설명 생성
+                    try:
+                        desc = generate_assumptive_description(tw.rawContent, mt)
+                    except Exception as e:
+                        print(f"[WARN] description fallback for {account} tw#{idx}: {e}")
+                        desc = f"관련 {mt}"
                     media_list.append({
-                        'type': mt,
-                        'url': url,
-                        'description': generate_assumptive_description(tw.rawContent, mt)
+                        'type':        mt,
+                        'url':         url,
+                        'description': desc
                     })
-                ## 최종 출력에 actual_user, original_user, content 사용
+                ## 최종 출력
                 output.append({
-                    'tweet_id'        : tw.id,
+                    'tweet_id'        : tweet_id,
                     'username'        : actual_user,
                     'original_author' : original_user,
                     'content'         : content,
@@ -296,7 +305,7 @@ async def collect_tweets(
                     'is_retweet'      : is_rt,
                     'scraped_at'      : datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 })
-        print(f"[DEBUG] ► {account}: 날짜 필터링 후 {len(output)}개의 트윗이 최종 포함됨")
+        print(f"[DEBUG] ► {account}: 날짜 필터링 및 RT 우선·중복 제거 후 {len(output)}개의 트윗이 최종 포함됨")
         await asyncio.sleep(10)
         return output
 
