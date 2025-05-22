@@ -8,3 +8,6 @@ venv/
 *.csv
 *.json
 *.db
+
+# 기타
+*.zip

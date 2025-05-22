@@ -80,27 +80,55 @@ def safe_load_db_accounts() -> Dict[str, Dict[str, str]]:
         return {}
 
 # -------------------------------
-# JSON vs DB 계정 비교
+# 신규 계정 판단 로직 (JSON vs DB)
 # -------------------------------
-def diff_accounts(
+def new_accounts(
     json_accounts: Dict[str, Dict[str, Any]],
     db_accounts: Dict[str, Dict[str, str]]
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> List[Dict[str, Any]]:
     to_add: List[Dict[str, Any]] = []
-    to_update: List[Dict[str, Any]] = []
     try:
         for acc in json_accounts.values():
-            db_acc = db_accounts.get(acc['id'])
-            if not db_acc:
+            if acc['id'] not in db_accounts:
                 to_add.append(acc)
-            elif acc['cookies'] != db_acc['cookies']:
-                to_update.append(acc)
-        print(f"[DEBUG] diff: to_add={len(to_add)}, to_update={len(to_update)}")
-        return to_add, to_update
+        print(f"[DEBUG] new: to_add={len(to_add)}")
+        return to_add
     except Exception as e:
-        print(f"[ERROR] diff_accounts failed: {e}")
+        print(f"[ERROR] new_accounts failed: {e}")
         traceback.print_exc()
         raise
+
+# -------------------------------
+# DB의 cookies 컬럼을 JSON의 최신 값으로 동기화
+# -------------------------------
+def sync_db_cookies(
+    json_accounts: Dict[str, Dict[str, Any]],
+    db_file: str = DB_FILE
+) -> None:
+    try:
+        conn = sqlite3.connect(db_file)
+        cur = conn.cursor()
+        for user_id, info in json_accounts.items():
+            # DB에 레코드가 존재하는지 확인
+            cur.execute("SELECT cookies FROM accounts WHERE username = ?", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                continue  # DB에 없는 계정은 건너뜁니다
+            db_cookie_str = row[0]
+            json_cookie_str = info.get('cookies', '')
+            # JSON과 DB 값이 다를 때만 업데이트
+            if json_cookie_str != db_cookie_str:
+                print(f"[DEBUG] Updating DB cookies for {user_id}")
+                cur.execute(
+                    "UPDATE accounts SET cookies = ? WHERE username = ?",
+                    (json_cookie_str, user_id)
+                )
+        conn.commit()
+    except Exception as e:
+        print(f"[ERROR] sync_db_cookies failed: {e}")
+        traceback.print_exc()
+    finally:
+        conn.close()
 
 # -------------------------------
 # 계정 등록 및 로그인 처리
@@ -110,10 +138,13 @@ async def register_and_login_accounts(
     accounts: Dict[str, Dict[str, Any]]
 ) -> None:
     try:
+        # DB에 이미 있는 계정의 cookies를 JSON 최신값으로만 동기화
+        sync_db_cookies(accounts, DB_FILE)
         print("[DEBUG] Loading existing DB accounts...")
         db_accounts = safe_load_db_accounts()
-        to_add, to_update = diff_accounts(accounts, db_accounts)
-        for acc in to_add + to_update:
+        # 신규 계정만 추가
+        to_add = new_accounts(accounts, db_accounts)
+        for acc in to_add:
             try:
                 print(f"[DEBUG] add_account: {acc['id']}")
                 await api.pool.add_account(
@@ -188,10 +219,11 @@ async def collect_tweets(
     account: str,
     start_time: datetime,
     end_time: datetime,
-    limit: int = 50
+    limit: int = 30
 ) -> List[Dict[str, Any]]:
     try:
         print(f"[DEBUG] ► 로그인한 사용자로부터 정보 조회 시작: {account}")
+        seen_ids = set() # 중복 체크용 ID 집합
         user = await api.user_by_login(account.lstrip('@'))
         tweets = await gather(api.user_tweets(user.id, limit=limit))
         print(f"[DEBUG] ► {account}: 총 {len(tweets)}개의 트윗을 API로부터 수신")
@@ -200,8 +232,26 @@ async def collect_tweets(
             snippet = tw.rawContent[:50].replace('\n', ' ')
             print(f"[TRACE] {account} 트윗 #{idx}: id={tw.id}, \"{snippet}...\"")
             if start_time <= tw.date <= end_time:
-                # tw.media가 None / 단일 객체 / 리스트인 경우 모두 처리
-                media_items = tw.media
+                # 중복 키 결정 & 스킵
+                is_rt = getattr(tw, 'is_retweet', False) or getattr(tw, 'retweeted', False)
+                key_id = (tw.retweeted_status.id if is_rt and getattr(tw, 'retweeted_status', None) else tw.id)
+                if key_id in seen_ids:
+                    continue
+                seen_ids.add(key_id)
+                # 트윗이 리트윗이라면 원문 트윗 객체에서 media, content, original_author를 가져오고
+                # 그렇지 않다면 자신(tw)에서 그대로 가져옵니다.
+                if is_rt and getattr(tw, 'retweeted_status', None):
+                    original      = tw.retweeted_status
+                    media_items   = original.media
+                    actual_user   = account.lstrip('@')       # 리트윗한 사람
+                    original_user = original.user.username    # 원저자
+                    content       = original.rawContent
+                else:
+                    media_items   = tw.media
+                    actual_user   = account.lstrip('@')       # 본인 계정
+                    original_user = tw.user.username          # 본인(원저자)
+                    content       = tw.rawContent
+                # media_items → iterable한 리스트로 변환
                 if media_items is None:
                     media_iter = []
                 elif isinstance(media_items, (list, tuple)):
@@ -210,12 +260,17 @@ async def collect_tweets(
                     media_iter = [media_items]
                 media_list: List[Dict[str, Any]] = []
                 for m in media_iter:
-                    # URL 뽑아내기
+                    ## 미디어 URL 추출 강화
                     url = (
-                        getattr(m, 'url', None)
-                        or getattr(m, 'media_url', None)
-                        or getattr(m, 'preview_url', None)
-                        or getattr(m, 'display_url', None)
+                        getattr(m, 'media_url_https', None) or
+                        getattr(m, 'url', None) or
+                        getattr(m, 'media_url', None) or
+                        getattr(m, 'preview_url', None) or
+                        getattr(m, 'display_url', None) or
+                        # 동영상 variants가 있을 경우 가장 첫 variant URL
+                        (m.variants[0].url
+                        if getattr(m, 'variants', None) and m.variants
+                        else None)
                     )
                     # 타입 판단
                     cls = m.__class__.__name__.lower()
@@ -225,19 +280,21 @@ async def collect_tweets(
                         mt = 'video'
                     else:
                         mt = 'other'
-
                     media_list.append({
                         'type': mt,
                         'url': url,
                         'description': generate_assumptive_description(tw.rawContent, mt)
                     })
+                ## 최종 출력에 actual_user, original_user, content 사용
                 output.append({
-                    'tweet_id': tw.id,
-                    'username': tw.user.username,
-                    'content': tw.rawContent,
-                    'created_at': tw.date.strftime("%Y-%m-%d %H:%M:%S"),
-                    'media_contents': media_list,
-                    'scraped_at': datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    'tweet_id'        : tw.id,
+                    'username'        : actual_user,
+                    'original_author' : original_user,
+                    'content'         : content,
+                    'created_at'      : tw.date.strftime("%Y-%m-%d %H:%M:%S"),
+                    'media_contents'  : media_list,
+                    'is_retweet'      : is_rt,
+                    'scraped_at'      : datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 })
         print(f"[DEBUG] ► {account}: 날짜 필터링 후 {len(output)}개의 트윗이 최종 포함됨")
         await asyncio.sleep(10)
