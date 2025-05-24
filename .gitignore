@@ -8,6 +8,8 @@ venv/
 *.csv
 *.json
 *.db
+/tweets_collects
+/tweets_results
 
 # 기타
 *.zip
