@@ -14,6 +14,7 @@ import bs4  # HTML 파싱용 BeautifulSoup 라이브러리
 import sqlite3  # SQLite DB 연결을 위한 표준 라이브러리
 import traceback  # 예외 발생 시 전체 스택 트레이스 출력
 from typing import Dict, List, Tuple, Any  # 타입 힌트
+import os
 
 # -------------------------------
 # 설정 상수
@@ -338,7 +339,9 @@ async def run_tweet_collection(api: API) -> None:
         all_tweets.extend(tweets)
         print(f"[INFO] ■ {acc} 완료 — 누적 수집 트윗 수: {len(all_tweets)}")
 
-    filename = f"collected_{end.strftime('%Y%m%d%H%M')}.json"
+    # 저장 디렉토리 및 파일 경로 구성
+    os.makedirs("tweets_collects", exist_ok=True)
+    filename = os.path.join("tweets_collects", f"tweets_{end.strftime('%Y%m%d%H%M')}.json")
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(all_tweets, f, ensure_ascii=False, indent=2)
         print(f"[INFO] 모든 수집 완료: 총 {len(all_tweets)}개의 트윗을 '{filename}'에 저장")
