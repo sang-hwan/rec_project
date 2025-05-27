@@ -1,5 +1,3 @@
-# quantitative_analysis.py
-
 import os  # 운영 체제 기능
 import glob  # 파일 패턴 검색
 import json  # JSON 입출력
