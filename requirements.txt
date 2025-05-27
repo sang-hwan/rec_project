@@ -6,3 +6,5 @@ fredapi
 python-dotenv
 tradingeconomics
 yfinance
+matplotlib
+statsmodels
