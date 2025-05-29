@@ -5,12 +5,9 @@ import requests   # HTTP 요청을 보내기 위한 라이브러리
 from datetime import datetime, timedelta, timezone  # 날짜 연산을 위한 표준 라이브러리
 from twscrape import API, gather  # twscrape API 객체 및 결과 수집 헬퍼
 from twscrape.models import MediaPhoto, MediaVideo, MediaAnimated # twscrape 라이브러리의 Media 클래스
-from x_client_transaction.utils import generate_headers, handle_x_migration, get_ondemand_file_url  # X 트랜잭션 ID 생성 유틸
-from x_client_transaction import ClientTransaction  # 트랜잭션 ID를 생성하는 클래스
 import re  # 정규표현식 처리용 표준 라이브러리
 from collections import Counter  # 단어 빈도 계산용 컨테이너
 import subprocess  # 외부 CLI 명령 실행용 표준 라이브러리
-import bs4  # HTML 파싱용 BeautifulSoup 라이브러리
 import sqlite3  # SQLite DB 연결을 위한 표준 라이브러리
 import traceback  # 예외 발생 시 전체 스택 트레이스 출력
 from typing import Dict, List, Tuple, Any  # 타입 힌트
@@ -176,25 +173,6 @@ async def register_and_login_accounts(
         raise
 
 # -------------------------------
-# X-Client-Transaction-ID 생성
-# -------------------------------
-def generate_transaction_id() -> str:
-    try:
-        session = requests.Session()
-        session.headers = generate_headers()
-        resp = handle_x_migration(session=session)
-        ondemand_url = get_ondemand_file_url(resp)
-        ondemand = session.get(ondemand_url)
-        soup = bs4.BeautifulSoup(ondemand.content, 'html.parser')
-        ct = ClientTransaction(resp, soup)
-        tid: str = ct.generate_transaction_id(method="POST", path="/1.1/onboarding/task.json")
-        return tid
-    except Exception as e:
-        print(f"[ERROR] generate_transaction_id failed: {e}")
-        traceback.print_exc()
-        raise
-
-# -------------------------------
 # 미디어 설명 생성
 # -------------------------------
 def generate_assumptive_description(text: str, media_type: str) -> str:
@@ -354,7 +332,6 @@ async def main() -> None:
         accounts = load_json_accounts()
         api = API()
         await register_and_login_accounts(api, accounts)
-        # api.headers['x-client-transaction-id'] = generate_transaction_id()
         await run_tweet_collection(api)
     except Exception as e:
         print(f"[ERROR] main failed: {e}")

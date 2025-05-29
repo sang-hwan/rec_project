@@ -2,7 +2,7 @@ import os
 import glob
 import pandas as pd
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fredapi import Fred
 from dotenv import load_dotenv
 from dbnomics import fetch_series
@@ -24,12 +24,15 @@ def main():
     print("[INFO] 매크로 데이터 수집 스크립트 시작")
     try:
         raw_folder = "macro_weekly_collects"
-        os.makedirs(raw_folder, exist_ok=True)                           # 데이터 폴더 준비
+        raw_data_folder = os.path.join(raw_folder, "raw")
+        processed_folder = os.path.join(raw_folder, "processed")
+        os.makedirs(raw_data_folder, exist_ok=True) # 데이터 폴더 준비
+        os.makedirs(processed_folder, exist_ok=True)
         print(f"[DEBUG] 폴더 준비 완료: {raw_folder}")
 
         # 기존 CSV 파일 삭제
-        for pattern in ["*_raw_*.csv", "macro_weekly_*.csv"]:
-            for fp in glob.glob(os.path.join(raw_folder, pattern)):
+        for folder, pattern in [(raw_data_folder, "*_raw_*.csv"), (processed_folder, "macro_weekly_*.csv")]:
+            for fp in glob.glob(os.path.join(folder, pattern)):
                 try:
                     os.remove(fp)
                     print(f"[DEBUG] 삭제 완료: {fp}")
@@ -52,13 +55,13 @@ def main():
             raise RuntimeError(f"FRED 클라이언트 초기화 실패: {e}")
 
         # 수집 기간 설정 (오늘 기준 5년 전부터)
-        end_date = datetime.utcnow().date()
+        end_date = datetime.now(timezone.utc).date()
         start_date = end_date - timedelta(days=5 * 365)
         print(f"[DEBUG] 데이터 수집 기간: {start_date} ~ {end_date}")
 
         # 출력 파일 이름 설정
         out_timestamp = datetime.now().strftime("%Y%m%d%H%M")
-        processed_filename = os.path.join(raw_folder, f"macro_weekly_{out_timestamp}.csv")
+        processed_filename = os.path.join(processed_folder, f"macro_weekly_{out_timestamp}.csv")
         print(f"[DEBUG] 처리된 파일 경로: {processed_filename}")
 
         # 지표 리스트 정의
@@ -118,7 +121,7 @@ def main():
                 time.sleep(0.5)
 
                 # 원본 CSV 저장
-                raw_file = os.path.join(raw_folder, f"{name}_raw_{out_timestamp}.csv")
+                raw_file = os.path.join(raw_data_folder, f"{name}_raw_{out_timestamp}.csv")
                 df_raw.to_csv(raw_file, index=False)
                 print(f"[DEBUG] 원본 파일 저장: {raw_file}")
 
@@ -129,7 +132,7 @@ def main():
         # 통합 및 리샘플링
         print("[INFO] 통합 및 리샘플링 시작")
         records = []
-        for fp in glob.glob(os.path.join(raw_folder, "*_raw_*.csv")):
+        for fp in glob.glob(os.path.join(raw_data_folder, "*_raw_*.csv")):
             try:
                 df = pd.read_csv(fp)                            # CSV 읽기
                 df = df[["Date", "Value"]].dropna(subset=["Date"])
@@ -153,7 +156,7 @@ def main():
         monthly_ffill_max_pct = 20.0  # 전진 채움 최대 허용 비율 (%)
         for col in df_monthly.columns:
             try:
-                raw_fp = glob.glob(os.path.join(raw_folder, f"{col}_raw_*.csv"))[0]
+                raw_fp = glob.glob(os.path.join(raw_data_folder, f"{col}_raw_{out_timestamp}.csv"))[0]
                 raw = pd.read_csv(raw_fp)
                 freq = detect_frequency(raw)                  # 원본 빈도 감지
                 pct_missing = df_monthly[col].isna().mean() * 100
