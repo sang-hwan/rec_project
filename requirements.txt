@@ -1,6 +1,5 @@
 twscrape
 pandas
-XClientTransaction
 requests
 fredapi
 python-dotenv
@@ -8,3 +7,4 @@ tradingeconomics
 yfinance
 matplotlib
 statsmodels
+dbnomics
