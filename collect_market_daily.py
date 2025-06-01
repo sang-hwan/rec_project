@@ -37,9 +37,15 @@ existing_dfs = []
 price_pattern = os.path.join(DATA_FOLDER, "market_prices_*.csv")
 for filepath in glob.glob(price_pattern):
     try:
-        df = pd.read_csv(filepath, parse_dates=["Date"])  # Date 파싱
-        existing_dfs.append(df)
-        print(f"[OK] 로드됨: {os.path.basename(filepath)} ({len(df)} rows)")
+        df_wide = pd.read_csv(filepath, parse_dates=["Date"])  # Date 파싱
+        df_long = df_wide.melt(
+            id_vars="Date",
+            value_vars=tickers,
+            var_name="Ticker",
+            value_name="Close"
+        ).dropna(subset=["Close"])
+        existing_dfs.append(df_long)
+        print(f"[OK] 로드됨 (wide→long 변환 완료): {os.path.basename(filepath)} ({len(df_long)} rows)")
     except Exception as e:
         print(f"[WARN] 로드 실패: {os.path.basename(filepath)} - {e}")
 
