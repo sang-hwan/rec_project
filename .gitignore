@@ -20,3 +20,4 @@ venv/
 
 # 기타
 *.zip
+test.*
