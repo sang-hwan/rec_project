@@ -1,7 +1,6 @@
 import asyncio  # 비동기 작업을 위한 표준 라이브러리
 import json       # JSON 파싱/생성을 위한 표준 라이브러리
 import pandas as pd  # CSV 파일 입출력 및 DataFrame 처리를 위한 라이브러리
-import requests   # HTTP 요청을 보내기 위한 라이브러리
 from datetime import datetime, timedelta, timezone  # 날짜 연산을 위한 표준 라이브러리
 from twscrape import API, gather  # twscrape API 객체 및 결과 수집 헬퍼
 from twscrape.models import MediaPhoto, MediaVideo, MediaAnimated # twscrape 라이브러리의 Media 클래스
@@ -318,8 +317,11 @@ async def run_tweet_collection(api: API) -> None:
         print(f"[INFO] ■ {acc} 완료 — 누적 수집 트윗 수: {len(all_tweets)}")
 
     # 저장 디렉토리 및 파일 경로 구성
-    os.makedirs("tweets_collects", exist_ok=True)
-    filename = os.path.join("tweets_collects", f"tweets_{end.strftime('%Y%m%d%H%M')}.json")
+    base_dir = "tweets_collects"
+    month_folder_name = f"tweets_{end.strftime('%Y%m')}"
+    full_dir = os.path.join(base_dir, month_folder_name)
+    os.makedirs(full_dir, exist_ok=True)
+    filename = os.path.join(full_dir, f"tweets_{end.strftime('%Y%m%d%H%M')}.json")
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(all_tweets, f, ensure_ascii=False, indent=2)
         print(f"[INFO] 모든 수집 완료: 총 {len(all_tweets)}개의 트윗을 '{filename}'에 저장")
