@@ -8,3 +8,5 @@ yfinance
 matplotlib
 statsmodels
 dbnomics
+pandas_datareader
+ta
