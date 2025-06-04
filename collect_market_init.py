@@ -43,7 +43,8 @@ tickers = [
     '^DJI',      # 다우존스 지수
     '^GSPC',     # S&P 500 지수
     '^IXIC',     # 나스닥 지수
-    '^VIX'       # 변동성 지수
+    '^VIX',      # 변동성 지수
+    '^RUT'       # Russell 2000 지수
 ]
 print(f"[DEBUG] 총 {len(tickers)}개 티커 수집 대상")
 

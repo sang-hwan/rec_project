@@ -5,19 +5,21 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 import yfinance as yf
 
+# 수집할 티커 목록
 tickers = [
     'CL=F',      # WTI 원유 선물
     'DX-Y.NYB',  # 달러 인덱스
-    'EURUSD=X',  # 유로/달러 환율
-    'GBPUSD=X',  # 파운드/달러 환율
+    'EURUSD=X',  # 유로/달러
+    'GBPUSD=X',  # 파운드/달러
     'GC=F',      # 금 선물
     'HG=F',      # 구리 선물
-    'JPY=X',     # 엔/달러 환율
+    'JPY=X',     # 엔/달러
     'NG=F',      # 천연가스 선물
     '^DJI',      # 다우존스 지수
     '^GSPC',     # S&P 500 지수
     '^IXIC',     # 나스닥 지수
-    '^VIX'       # 변동성 지수 (VIX)
+    '^VIX',      # 변동성 지수
+    '^RUT'       # Russell 2000 지수
 ]
 DATA_FOLDER = "market_daily_collects"
 YEARS_TO_KEEP = 5
