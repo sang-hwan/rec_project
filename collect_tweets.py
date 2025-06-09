@@ -11,6 +11,7 @@ import sqlite3  # SQLite DB 연결을 위한 표준 라이브러리
 import traceback  # 예외 발생 시 전체 스택 트레이스 출력
 from typing import Dict, List, Tuple, Any  # 타입 힌트
 import os
+import random
 
 # -------------------------------
 # 설정 상수
@@ -154,7 +155,7 @@ async def register_and_login_accounts(
         print("[DEBUG] Checking logged-out accounts via CLI")
         result = subprocess.run(['twscrape', 'accounts'], capture_output=True, text=True)
         lines = result.stdout.strip().split('\n')[1:]
-        logged_out = [l.split()[0] for l in lines if len(l.split())>1 and l.split()[1]=='0']
+        logged_out = [l.split()[0] for l in lines if len(l.split())>2 and l.split()[2] == 'False']
         if not logged_out:
             print("✅ All accounts are active")
             return
@@ -198,7 +199,7 @@ async def collect_tweets(
     account: str,
     start_time: datetime,
     end_time: datetime,
-    limit: int = 30
+    limit: int = 500
 ) -> List[Dict[str, Any]]:
     try:
         print(f"[DEBUG] ► 로그인한 사용자로부터 정보 조회 시작: {account}")
@@ -284,7 +285,7 @@ async def collect_tweets(
                     'scraped_at'      : datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 })
         print(f"[DEBUG] ► {account}: 날짜 필터링 및 RT 우선·중복 제거 후 {len(output)}개의 트윗이 최종 포함됨")
-        await asyncio.sleep(10)
+        await asyncio.sleep(random.uniform(10,15))
         return output
 
     except Exception as e:
@@ -302,7 +303,7 @@ async def run_tweet_collection(api: API) -> None:
 
     # UTC 타임존 정보까지 포함한 aware datetime 으로 생성
     end   = datetime.now(timezone.utc)
-    start = end - timedelta(days=1)
+    start = end - timedelta(days=6)
     print(f"[INFO] 전체 수집 시작: from {start.isoformat()} to {end.isoformat()}")
 
     all_tweets: List[Dict[str, Any]] = []
@@ -318,10 +319,13 @@ async def run_tweet_collection(api: API) -> None:
 
     # 저장 디렉토리 및 파일 경로 구성
     base_dir = "tweets_collects"
-    month_folder_name = f"tweets_{end.strftime('%Y%m')}"
+    month_folder_name = f"tweets_{start.strftime('%Y%m')}"
     full_dir = os.path.join(base_dir, month_folder_name)
     os.makedirs(full_dir, exist_ok=True)
-    filename = os.path.join(full_dir, f"tweets_{end.strftime('%Y%m%d%H%M')}.json")
+    filename = os.path.join(
+        full_dir,
+        f"tweets_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.json"
+    )
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(all_tweets, f, ensure_ascii=False, indent=2)
         print(f"[INFO] 모든 수집 완료: 총 {len(all_tweets)}개의 트윗을 '{filename}'에 저장")
