@@ -9,11 +9,9 @@ venv/
 *.json
 *.db
 /analysis_qualitative
-/analysis_quantitative
 /analysis_result
+/archive
 /tweets_collects
-/macro_weekly_collects
-/market_daily_collects
 
 # 환경 변수 및 민감 정보
 *.env
