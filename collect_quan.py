@@ -3,12 +3,10 @@ import glob
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import yfinance as yf
-from pandas_datareader import data as pdr
 import requests
 from dotenv import load_dotenv
 from fredapi import Fred
 from dbnomics import fetch_series
-from pandas.api.types import is_series
 
 # 사용자 설정
 # - ASSET_TICKERS: 수집할 자산 티커를 카테고리별로 지정하세요.
@@ -53,8 +51,11 @@ CATEGORIES = {
     'macro_processed':      os.path.join(BASE_DIR, 'macroeconomic', 'processed'),
 }
 for folder in CATEGORIES.values():
-    os.makedirs(folder, exist_ok=True)
-    print(f"[INFO] Directory ready: {folder}")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        print(f"[INFO] Directory ready: {folder}")
+    except Exception as e:
+        print(f"[ERROR] Could not create directory {folder}: {e}")
 
 # 공통 저장 함수
 # 이전에 저장된 동일 티커 파일을 삭제한 후 새로운 CSV를 저장합니다.
@@ -78,7 +79,7 @@ def save_df(df: pd.DataFrame, category: str, filename: str) -> bool:
     file_path = os.path.join(folder, filename)
     try:
         df.to_csv(file_path)
-        print(f"[INFO] Saved CSV: {file_path}")
+        print(f"[INFO] Saved CSV: {file_path} (shape: {df.shape})")
         return True
     except Exception as err:
         print(f"[ERROR] Failed to save {file_path}: {err}")
@@ -101,14 +102,17 @@ def fetch_daily_price(ticker: str) -> pd.DataFrame:
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.title() for c in df.columns]
+        print(f"[TRACE] Columns after flatten & title-case: {df.columns.tolist()}")
         
         if df.empty:
             print(f"[WARN] No price data for {ticker}")
             return None
         
         filename = f"{ticker.lower()}_{start_price_str}_{end_str}.csv"
-        save_df(df, 'daily_prices', filename)
-        return df
+        if save_df(df, 'daily_prices', filename):
+            return df
+        else:
+            return None
     except Exception as err:
         print(f"[ERROR] fetch_daily_price error for {ticker}: {err}")
         return None
@@ -130,6 +134,7 @@ def compute_technical_indicators(df: pd.DataFrame, ticker: str):
         weekly = df.resample('W-FRI').agg({
             'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'
         }).dropna()
+        print(f"[TRACE] Weekly resampled data (shape: {weekly.shape})")
         # 공통 지표: RSI, MACD, Bollinger Bands, ATR
         data_common = weekly.copy()
         # RSI
@@ -138,22 +143,26 @@ def compute_technical_indicators(df: pd.DataFrame, ticker: str):
         down  = -delta.clip(upper=0)
         rs    = up.rolling(14).mean() / down.rolling(14).mean()
         data_common['RSI_14'] = 100 - (100 / (1 + rs))
+        print("[TRACE] RSI calculated")
         # MACD
         ema12 = data_common['Close'].ewm(span=12, adjust=False).mean()
         ema26 = data_common['Close'].ewm(span=26, adjust=False).mean()
         data_common['MACD']        = ema12 - ema26
         data_common['MACD_Signal'] = data_common['MACD'].ewm(span=9, adjust=False).mean()
+        print("[TRACE] MACD & Signal calculated")
         # Bollinger Bands
         mavg = data_common['Close'].rolling(20).mean()
         sd   = data_common['Close'].rolling(20).std()
         data_common['BB_Upper'] = mavg + 2 * sd
         data_common['BB_Lower'] = mavg - 2 * sd
+        print("[TRACE] Bollinger Bands calculated")
         # ATR
         high_low  = data_common['High'] - data_common['Low']
         high_prev = (data_common['High'] - data_common['Close'].shift()).abs()
         low_prev  = (data_common['Low']  - data_common['Close'].shift()).abs()
         true_range = pd.concat([high_low, high_prev, low_prev], axis=1).max(axis=1)
         data_common['ATR_14'] = true_range.rolling(14).mean()
+        print("[TRACE] ATR calculated")
 
         # 윈도우별 SMA & EMA
         for label, window in PERIODS.items():
@@ -173,6 +182,7 @@ def compute_bond_indicator(df: pd.DataFrame, ticker: str):
     try:
         col = df.columns[0]
         ma  = df[col].rolling(4).mean().to_frame(name=f"MA4_{col}")
+        print(f"[TRACE] 4-week MA computed for {ticker} (first rows:\n{ma.head()})")
         filename = f"{ticker.lower()}_ma4_{start_price_str}_{end_str}.csv"
         save_df(ma, 'technical_indicators', filename)
     except Exception as err:
@@ -190,6 +200,7 @@ def fetch_fundamentals(ticker: str):
             'P/E': info.get('trailingPE'),
             'ROE': info.get('returnOnEquity')
         }]).set_index('Date')
+        print(f"[TRACE] Fundamentals fetched: {df.to_dict('records')}")
         filename = f"{ticker.lower()}_{start_fund_str}_{end_str}.csv"
         save_df(df, 'fundamentals', filename)
     except Exception as err:
@@ -213,6 +224,7 @@ def fetch_alternative_data(asset: str, conf: dict) -> pd.DataFrame:
             df  = pd.DataFrame(raw, columns=['timestamp', 'price'])
             df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
             df = df.set_index('Date')['price'].resample('W-FRI').last().to_frame()
+            print(f"[TRACE] Alt-data for {asset} after resample (shape: {df.shape})")
         else:
             print(f"[ERROR] Unsupported provider for {asset}: {provider}")
             return None
@@ -233,18 +245,14 @@ def collect_macroeconomic():
     proc_path   = os.path.join(proc_folder, proc_file)
 
     prev_df = None
-    if os.path.exists(proc_path):
-        try:
-            prev_df  = pd.read_csv(proc_path, index_col='Date', parse_dates=['Date'])
+    try:
+        prev_df = pd.read_csv(proc_path, index_col='Date', parse_dates=['Date']) if os.path.exists(proc_path) else None
+        if prev_df is not None:
             last_date = prev_df.index.max().date()
-            if last_date >= end_date:
-                print("[INFO] Macroeconomic data is already up-to-date")
-                return
-            start_eff = last_date + timedelta(days=1)
-        except Exception as err:
-            print(f"[WARN] Could not load existing macro data: {err}")
-            start_eff = start_macro_date
-    else:
+            print(f"[TRACE] Existing processed macro file last date: {last_date}")
+        start_eff = start_macro_date
+    except Exception as err:
+        print(f"[WARN] Could not load existing macro data: {err}")
         start_eff = start_macro_date
 
     load_dotenv()
@@ -281,17 +289,32 @@ def collect_macroeconomic():
 
     records = []
     for name, info in indicators.items():
+        raw_pattern = os.path.join(raw_folder, f"{name.lower()}_*.csv")
+        raw_files = glob.glob(raw_pattern)
+        if raw_files:
+            # 파일명 마지막 부분(YYYYMMDD) 파싱
+            dates = [datetime.strptime(os.path.basename(f).split('_')[-1].split('.csv')[0], '%Y%m%d').date()
+                     for f in raw_files]
+            last_raw = max(dates)
+            # 기존 start_eff 보다 raw 기준이 뒤면 그 다음날부터 수집
+            if last_raw >= start_eff:
+                start_eff_i = last_raw + timedelta(days=1)
+            else:
+                start_eff_i = start_eff
+        else:
+            start_eff_i = start_eff
+        print(f"[DEBUG] {name}: effective start date set to {start_eff_i}")
         print(f"[DEBUG] Fetching macro: {name}")
         try:
             if info["source"] == "FRED":
                 series = fred.get_series(info["fred_code"], start_eff, end_date)
                 df_raw = series.rename_axis('Date').reset_index(name='Value')
-
             else:
+                print(f"[DEBUG] Now fetching DBnomics for {name=} with provider={info['provider']}, "f"dataset={info['dataset']}, series={info['series']}")
                 df_raw = fetch_series(info["provider"], info["dataset"], info["series"])
 
                 # Series → DataFrame 변환 & 컬럼 정규화
-                if is_series(df_raw):
+                if isinstance(df_raw, pd.Series):
                     df_raw = df_raw.to_frame(name='Value').reset_index()
 
                 # DBnomics 응답 컬럼명이 `period` 인 경우가 있어
@@ -299,25 +322,31 @@ def collect_macroeconomic():
                 df_raw = df_raw.rename(columns={'period':'Date','date':'Date','value':'Value'})
                 df_raw['Date'] = pd.to_datetime(df_raw['Date'])
                 df_raw = df_raw[
-                    (df_raw['Date'].dt.date >= start_eff) &
+                    (df_raw['Date'].dt.date >= start_eff_i) &
                     (df_raw['Date'].dt.date <= end_date)
                 ]
-
-            raw_name = f"{name.lower()}_{start_macro_str}_{end_str}.csv"
+            print(f"[TRACE] Raw macro ({name}) shape: {df_raw.shape}")
+            if df_raw.empty:
+                print(f"[WARN] {name}: no new data after {start_eff_i}, skipping.")
+                continue
+            # 파일명에 실제 수집된 첫/마지막 관측일을 반영
+            first = df_raw['Date'].dt.date.min().strftime('%Y%m%d')
+            last  = df_raw['Date'].dt.date.max().strftime('%Y%m%d')
+            raw_name = f"{name.lower()}_{first}_{last}.csv"
             df_raw.to_csv(os.path.join(raw_folder, raw_name), index=False)
-            records.append(df_raw.set_index('Date')['Value'].rename(name))
+            series = df_raw.set_index('Date')['Value'].rename(name)
+            if not series.empty:
+                records.append(series)
 
         except Exception as err:
             print(f"[ERROR] Failed macro fetch for {name}: {err}")
 
     try:
-        # pandas 2.2 경고 대응
-        # 'M'(Deprecated) → 'ME'(Month‑End) 로 변경. 
         df_all = pd.concat(records, axis=1).resample('ME').last().dropna(how='all')
 
         if prev_df is not None:
             df_all = pd.concat([prev_df, df_all]).loc[~df_all.index.duplicated(keep='last')]
-
+        print(f"[TRACE] Processed macro data shape: {df_all.shape}")
         save_df(df_all, 'macro_processed', proc_file)
 
     except Exception as err:
@@ -327,34 +356,45 @@ def collect_macroeconomic():
 if __name__ == '__main__':
     print("[START] Data collection pipeline initiated")
 
-    # 주식/ETF/원자재/외환 가격 및 지표
-    for category in ['stocks_etfs', 'commodities', 'forex']:
-        for ticker in ASSET_TICKERS.get(category, []):
-            df_price = fetch_daily_price(ticker)
-            if df_price is not None:
-                compute_technical_indicators(df_price, ticker)
+    try:
+        # 주식/ETF/원자재/외환 가격 및 지표 수집
+        for category in ['stocks_etfs', 'commodities', 'forex']:
+            for ticker in ASSET_TICKERS.get(category, []):
+                df_price = fetch_daily_price(ticker)
+                if df_price is not None:
+                    compute_technical_indicators(df_price, ticker)
 
-    # 채권 데이터 수집 및 단순 이동평균
-    for ticker in ASSET_TICKERS.get('bonds', []):
-        print(f"[DEBUG] Fetching bond data for: {ticker}")
-        try:
-            dfb = pdr.DataReader(ticker, 'fred', start_price_date, end_date)
-            df_weekly = dfb.resample('W-FRI').last().dropna()
-            fn = f"{ticker.lower()}_{start_price_str}_{end_str}.csv"
-            save_df(df_weekly, 'daily_prices', fn)
-            compute_bond_indicator(df_weekly, ticker)
-        except Exception as err:
-            print(f"[ERROR] Bond fetch failed for {ticker}: {err}")
+        # 채권 데이터
+        for ticker in ASSET_TICKERS.get('bonds', []):
+            print(f"[DEBUG] Fetching bond data for: {ticker}")
+            try:
+                load_dotenv()
+                fred_api_key = os.getenv("FRED_API_KEY")
+                if not fred_api_key:
+                    raise ValueError("FRED_API_KEY is not set in .env file.")
+                fred = Fred(api_key=fred_api_key)
+                series = fred.get_series(ticker, start_price_date, end_date)
+                dfb = series.rename("Value").to_frame()
+                df_weekly = dfb.resample('W-FRI').last().dropna()
+                print(f"[TRACE] Bond weekly data (shape: {df_weekly.shape})")
+                fn = f"{ticker.lower()}_{start_price_str}_{end_str}.csv"
+                save_df(df_weekly, 'daily_prices', fn)
+                compute_bond_indicator(df_weekly, ticker)
+            except Exception as err:
+                print(f"[ERROR] Bond fetch failed for {ticker}: {err}")
 
-    # 재무 지표 수집
-    for ticker in FUNDAMENTALS_TICKERS:
-        fetch_fundamentals(ticker)
+        # 재무 지표 수집
+        for ticker in FUNDAMENTALS_TICKERS:
+            fetch_fundamentals(ticker)
 
-    # 대체 자산 데이터 수집
-    for asset, conf in ALT_ASSETS.items():
-        fetch_alternative_data(asset, conf)
+        # 대체 자산 데이터 수집
+        for asset, conf in ALT_ASSETS.items():
+            fetch_alternative_data(asset, conf)
 
-    # 거시경제 데이터 수집
-    collect_macroeconomic()
+        # 거시경제 데이터 수집
+        collect_macroeconomic()
 
-    print("[END] data collection complete")
+    except Exception as err:
+        print(f"[FATAL] Unhandled exception in main pipeline: {err}")
+
+    print("[END] Data collection complete")
