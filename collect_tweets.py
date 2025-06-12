@@ -7,7 +7,7 @@ import sqlite3  # SQLite 연동용
 import traceback  # 예외 정보 출력용
 import re       # 정규표현식 처리용
 from collections import Counter  # 단어 빈도 계산용
-from datetime import datetime, timedelta, timezone  # 시간 연산용
+from datetime import datetime, timedelta, timezone, time  # 시간 연산용
 from typing import Any, Dict, List  # 타입 힌트용
 
 import pandas as pd  # CSV 및 DataFrame 처리용
@@ -130,6 +130,12 @@ def sync_db_cookies(json_accounts: Dict[str, Dict[str, Any]],
 #========================
 async def register_and_login_accounts(api: API, accounts: Dict[str, Dict[str, Any]]) -> None:
     try:
+        # DB 초기화: JSON에 정의된 계정 외 기존 rows 전부 삭제
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM accounts")
+        conn.commit()
+        conn.close()
         sync_db_cookies(accounts)
         db_accounts = safe_load_db_accounts()
         for acc in new_accounts(accounts, db_accounts):
@@ -196,7 +202,8 @@ async def collect_tweets(api: API, account: str, start_time: datetime,
             snippet = tw.rawContent[:50].replace('\n', ' ')
             print(f"[TRACE] {account} tweet#{idx} id={tw.id} '{snippet}...' ")
             if tw.rawContent.startswith("RT @"): continue
-            if not (start_time <= tw.date <= end_time): continue
+            tw_day = tw.date.date()
+            if not (start_time.date() <= tw_day <= end_time.date()): continue
             is_rt = getattr(tw, 'retweetedTweet', None) is not None
             original = tw.retweetedTweet if is_rt else tw
             tid = original.id
@@ -236,10 +243,10 @@ async def collect_tweets(api: API, account: str, start_time: datetime,
                 'username': account.lstrip('@'),
                 'original_author': original.user.username,
                 'content': original.rawContent,
-                'created_at': original.date.strftime("%Y-%m-%d %H:%M:%S"),
+                'created_at': original.date.strftime("%Y-%m-%d"),
                 'media_contents': media_items,
                 'is_retweet': is_rt,
-                'scraped_at': datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                'scraped_at': datetime.utcnow().strftime("%Y-%m-%d")
             })
         print(f"[DEBUG] {account}: filtered and deduped {len(output)} tweets")
         await asyncio.sleep(random.uniform(10, 15))
@@ -260,10 +267,14 @@ async def run_tweet_collection(api: API) -> None:
         print("[ERROR] Failed to load CSV:", e)
         traceback.print_exc()
         raise
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=6)
+    today = datetime.now(timezone.utc).date()
+    weekday = today.weekday()  # 월=0 … 일=6
+    monday = today - timedelta(days=weekday)
+    start = datetime.combine(monday, time.min, tzinfo=timezone.utc)
+    end   = datetime.combine(today,  time.max, tzinfo=timezone.utc)
     print(f"[INFO] Start collection from {start.isoformat()} to {end.isoformat()}")
     all_tweets = []
+    seen_global: set[int] = set()  # 계정 간 중복 제거용 전역 집합
     for acc in accounts:
         print(f"[INFO] Processing {acc}")
         try:
@@ -271,7 +282,9 @@ async def run_tweet_collection(api: API) -> None:
         except Exception:
             print(f"[ERROR] ■ {acc} 수집 중 치명적 에러 발생 — 전체 프로세스 중단")
             raise
-        all_tweets.extend(tweets)
+        unique = [t for t in tweets if t['tweet_id'] not in seen_global]
+        seen_global.update(t['tweet_id'] for t in unique)
+        all_tweets.extend(unique)
         print(f"[INFO] Collected so far: {len(all_tweets)} tweets")
     folder = f"tweets_{start.strftime('%Y%m')}"
     out_dir = os.path.join('tweets_collects', folder)
