@@ -11,6 +11,7 @@ venv/
 /analysis_qualitative
 /analysis_result
 /archive
+/quant_collects
 /tweets_collects
 
 # 환경 변수 및 민감 정보
