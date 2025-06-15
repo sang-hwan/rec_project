@@ -1,18 +1,15 @@
-import os
-import glob
+import os, glob, time
 from datetime import datetime, timedelta, timezone
-import pandas as pd
-import yfinance as yf
-import requests
+import pandas as pd, yfinance as yf, requests
 from dotenv import load_dotenv
 from fredapi import Fred
 from dbnomics import fetch_series
 
 # ──────────────────────────────────────────────────────────────
-# 🔧 (신규) 공통 유틸: DataFrame 요약 출력
+# 🔧 공통 유틸: DataFrame 요약 출력
 # ──────────────────────────────────────────────────────────────
 def _summarize_df(df: pd.DataFrame, label: str, rows: int = 3):
-    """DataFrame의 구조와 일부 데이터를 1‑3줄로 요약해 print."""
+    # DataFrame 구조와 일부 행을 간단히 print
     try:
         if df is None:
             print(f"[SUMMARY] {label}: <None>")
@@ -30,17 +27,34 @@ def _summarize_df(df: pd.DataFrame, label: str, rows: int = 3):
 # ──────────────────────────────────────────────────────────────
 # 1. 사용자 설정
 # ──────────────────────────────────────────────────────────────
+# 자산군별 일봉 ohlcv
 ASSET_TICKERS = {
-    'stocks_etfs': ['TSLA'],       # 예: ['TSLA','AAPL']
-    'commodities': [],             # 예: ['GC=F','CL=F']
-    'forex': [],                   # 예: ['USDKRW=X','EURUSD=X']
-    'bonds': ['DGS10'],            # 예: ['DGS10']
-    'crypto': ['ethereum']         # 예: ['bitcoin','ethereum']
+    'stocks_etfs': ['TSLA'],   # 예) ['TSLA','AAPL','QQQ']
+    'commodities': [],         # 예) ['GC=F','CL=F']
+    'forex':       [],         # 예) ['USDKRW=X','EURUSD=X']
+    'bonds':       ['DGS10'],  # 예) ['DGS10']
+    'crypto':      ['ethereum']
 }
-FUNDAMENTALS_TICKERS = []          # 예: ['TSLA','AAPL']
-ALT_ASSETS = {
-    # 'bitcoin': {'provider': 'coingecko'},
-    # 'gold': {'provider': 'custom_api', 'endpoint': 'https://api.example.com/gold'}
+
+# 주식: 재무지표
+# 코인: 온체인지표
+# 그외 자산군: 대체지표가 없음
+# 공포탐욕지수는 정량 데이터에 포함되어야 하는지 애매함
+QUANT_ASSETS = {
+    'TSLA': {
+        'type': 'fundamental',
+        'ticker': 'TSLA'
+    },
+    'ethereum': {
+        'type': 'onchain',
+        'provider': 'coingecko',
+        'ticker': 'ethereum'
+    },
+    # 'fear_greed': {
+    #     'type': 'alternative',
+    #     'provider': 'custom_api',
+    #     'endpoint': 'https://api.alternative.me/fng/?limit=0'
+    # }
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -48,12 +62,11 @@ ALT_ASSETS = {
 # ──────────────────────────────────────────────────────────────
 now_utc          = datetime.now(timezone.utc)
 end_date         = now_utc.date()
-start_price_date = end_date - timedelta(days=365 * 5)   # 5년 전
-start_fund_date  = end_date - timedelta(days=365 * 3)   # 3년 전
-start_macro_date = end_date - timedelta(days=365 * 10)  # 10년 전
-start_alt_date   = end_date - timedelta(days=365 * 3)   # 3년 전
+start_price_date = end_date - timedelta(days=365 * 5)   # 5년
+start_fund_date  = end_date - timedelta(days=365 * 3)   # 3년
+start_macro_date = end_date - timedelta(days=365 * 10)  # 10년
+start_alt_date   = end_date - timedelta(days=365 * 3)   # 3년
 
-# 문자열 포맷
 start_price_str = start_price_date.strftime('%Y%m%d')
 start_fund_str  = start_fund_date.strftime('%Y%m%d')
 start_macro_str = start_macro_date.strftime('%Y%m%d')
@@ -89,17 +102,23 @@ def save_df(df: pd.DataFrame, category: str, filename: str) -> bool:
         print(f"[ERROR] Unknown category: {category}")
         return False
 
-    # 동일 티커라도 SMA·EMA 윈도우별 파일을 보존
-    prefix = '_'.join(filename.split('_')[:2])
-    for old_file in glob.glob(os.path.join(folder, f"{prefix}_*.csv")):
+    # ‘같은 종목·라벨’ 데이터 갱신 → 이전 파일 정리
+    # prefix: 확장자 제거 후 '끝 날짜'만 제외 (ex: tsla_short_20200101_20250614.csv)
+    base = filename.rsplit('.', 1)[0]
+    parts = base.split('_')
+    if category == 'technical_indicators':
+        prefix = "_".join(parts[:2])
+    else:
+        prefix = parts[0]
+    for old in glob.glob(os.path.join(folder, f"{prefix}_*.csv")):
         try:
-            os.remove(old_file)
-            print(f"[DEBUG] Removed old file: {old_file}")
+            os.remove(old)
+            print(f"[DEBUG] Removed old file: {old}")
         except Exception as err:
-            print(f"[WARN] Could not remove {old_file}: {err}")
+            print(f"[WARN] Could not remove {old}: {err}")
 
-    file_path = os.path.join(folder, filename)
     try:
+        file_path = os.path.join(folder, filename)
         df.to_csv(file_path)
         print(f"[INFO] Saved CSV: {file_path} (shape: {df.shape})")
         return True
@@ -120,24 +139,20 @@ def fetch_daily_price(ticker: str) -> pd.DataFrame:
             interval='1d',
             progress=False
         )
-
-        # yfinance 0.2+ 단일티커 결과는 MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df.columns = [c.title() for c in df.columns]
-        print(f"[TRACE] Columns after flatten: {df.columns.tolist()}")
 
         if df.empty:
             print(f"[WARN] No price data for {ticker} (empty DataFrame)")
             return None
 
-        _summarize_df(df.tail(5), f"{ticker} ‑ raw price (last 5 rows)")
+        _summarize_df(df.tail(5), f"{ticker} ‑ raw price (last 5)")
 
         filename = f"{ticker.lower()}_{start_price_str}_{end_str}.csv"
         if save_df(df, 'daily_prices', filename):
             return df
-        else:
-            return None
+        return None
     except Exception as err:
         print(f"[ERROR] fetch_daily_price error for {ticker}: {err}")
         return None
@@ -146,7 +161,6 @@ def fetch_daily_price(ticker: str) -> pd.DataFrame:
 # 5‑B. 기술지표 계산
 # ──────────────────────────────────────────────────────────────
 PERIODS = {'short': 20, 'mid': 50, 'long': 200}
-
 def compute_technical_indicators(df: pd.DataFrame, ticker: str):
     print(f"[STEP] 1‑B. Computing technical indicators for {ticker}")
     try:
@@ -160,64 +174,44 @@ def compute_technical_indicators(df: pd.DataFrame, ticker: str):
             'Open': 'first', 'High': 'max', 'Low': 'min',
             'Close': 'last', 'Volume': 'sum'
         }).dropna()
-        print(f"[INFO] Weekly resampled rows: {weekly.shape[0]}")
         _summarize_df(weekly, f"{ticker} ‑ weekly (head)")
 
-        # ─ 지표 계산
         data_common = weekly.copy()
 
         # RSI
-        try:
-            delta = data_common['Close'].diff()
-            up    = delta.clip(lower=0)
-            down  = -delta.clip(upper=0)
-            rs    = up.rolling(14).mean() / down.rolling(14).mean()
-            data_common['RSI_14'] = 100 - (100 / (1 + rs))
-            print("[TRACE] RSI calculated")
-        except Exception as e:
-            print(f"[WARN] RSI calc failed ({ticker}): {e}")
+        delta = data_common['Close'].diff()
+        up    = delta.clip(lower=0)
+        down  = -delta.clip(upper=0)
+        rs    = up.rolling(14).mean() / down.rolling(14).mean()
+        data_common['RSI_14'] = 100 - (100 / (1 + rs))
 
         # MACD
-        try:
-            ema12 = data_common['Close'].ewm(span=12, adjust=False).mean()
-            ema26 = data_common['Close'].ewm(span=26, adjust=False).mean()
-            data_common['MACD']        = ema12 - ema26
-            data_common['MACD_Signal'] = data_common['MACD'].ewm(span=9, adjust=False).mean()
-            print("[TRACE] MACD calculated")
-        except Exception as e:
-            print(f"[WARN] MACD calc failed ({ticker}): {e}")
+        ema12 = data_common['Close'].ewm(span=12, adjust=False).mean()
+        ema26 = data_common['Close'].ewm(span=26, adjust=False).mean()
+        data_common['MACD']        = ema12 - ema26
+        data_common['MACD_Signal'] = data_common['MACD'].ewm(span=9, adjust=False).mean()
 
         # Bollinger Bands
-        try:
-            mavg = data_common['Close'].rolling(20).mean()
-            sd   = data_common['Close'].rolling(20).std()
-            data_common['BB_Upper'] = mavg + 2 * sd
-            data_common['BB_Lower'] = mavg - 2 * sd
-            print("[TRACE] Bollinger Bands calculated")
-        except Exception as e:
-            print(f"[WARN] Bollinger Bands calc failed ({ticker}): {e}")
+        mavg = data_common['Close'].rolling(20).mean()
+        sd   = data_common['Close'].rolling(20).std()
+        data_common['BB_Upper'] = mavg + 2 * sd
+        data_common['BB_Lower'] = mavg - 2 * sd
 
         # ATR
-        try:
-            high_low  = data_common['High'] - data_common['Low']
-            high_prev = (data_common['High'] - data_common['Close'].shift()).abs()
-            low_prev  = (data_common['Low']  - data_common['Close'].shift()).abs()
-            true_range = pd.concat([high_low, high_prev, low_prev], axis=1).max(axis=1)
-            data_common['ATR_14'] = true_range.rolling(14).mean()
-            print("[TRACE] ATR calculated")
-        except Exception as e:
-            print(f"[WARN] ATR calc failed ({ticker}): {e}")
+        tr = pd.concat([
+            data_common['High'] - data_common['Low'],
+            (data_common['High'] - data_common['Close'].shift()).abs(),
+            (data_common['Low']  - data_common['Close'].shift()).abs()
+        ], axis=1).max(axis=1)
+        data_common['ATR_14'] = tr.rolling(14).mean()
 
-        # ─ SMA & EMA (기간별)
-        for label, window in PERIODS.items():
-            try:
-                data = data_common.copy()
-                data[f"SMA_{window}"] = data['Close'].rolling(window).mean()
-                data[f"EMA_{window}"] = data['Close'].ewm(span=window, adjust=False).mean()
-                filename = f"{ticker.lower()}_{label}_{start_price_str}_{end_str}.csv"
-                save_df(data, 'technical_indicators', filename)
-            except Exception as e:
-                print(f"[WARN] {label} window calc failed ({ticker}): {e}")
+        # SMA/EMA
+        for label, win in PERIODS.items():
+            data = data_common.copy()
+            data[f"SMA_{win}"] = data['Close'].rolling(win).mean()
+            data[f"EMA_{win}"] = data['Close'].ewm(span=win, adjust=False).mean()
+            fn = f"{ticker.lower()}_{label}_{start_price_str}_{end_str}.csv"
+            save_df(data, 'technical_indicators', fn)
 
     except Exception as err:
         print(f"[ERROR] compute_technical_indicators error for {ticker}: {err}")
@@ -237,10 +231,13 @@ def compute_bond_indicator(df: pd.DataFrame, ticker: str):
         print(f"[ERROR] compute_bond_indicator error for {ticker}: {err}")
 
 # ──────────────────────────────────────────────────────────────
-# 5‑D. 재무 지표
+# 5‑D. 재무지표/온체인지표/그외지표 수집 로직
+#   · type 에 따라 내부 helper 를 호출
 # ──────────────────────────────────────────────────────────────
-def fetch_fundamentals(ticker: str):
-    print(f"[STEP] 2. Fetching fundamentals for {ticker}")
+
+# --- private helpers ---------------------------------------------------------
+def _fetch_fundamental(ticker: str) -> pd.DataFrame | None:
+    """Yahoo Finance 재무지표 단건 스냅샷"""
     try:
         info = yf.Ticker(ticker).info
         df = pd.DataFrame([{
@@ -252,43 +249,83 @@ def fetch_fundamentals(ticker: str):
         _summarize_df(df, f"{ticker} ‑ fundamentals")
         filename = f"{ticker.lower()}_{start_fund_str}_{end_str}.csv"
         save_df(df, 'fundamentals', filename)
+        return df
     except Exception as err:
-        print(f"[ERROR] fetch_fundamentals error for {ticker}: {err}")
+        print(f"[ERROR] _fetch_fundamental error for {ticker}: {err}")
+        return None
 
-# ──────────────────────────────────────────────────────────────
-# 5‑E. 대체 자산
-# ──────────────────────────────────────────────────────────────
-def fetch_alternative_data(asset: str, conf: dict) -> pd.DataFrame:
-    print(f"[STEP] 3. Fetching alternative data for {asset}")
+
+def _fetch_onchain(provider: str, ticker: str) -> pd.DataFrame | None:
+    """Coingecko 등 온체인/시장 데이터"""
+    if provider != 'coingecko':
+        print(f"[ERROR] Unsupported on‑chain provider: {provider}")
+        return None
     try:
-        provider = conf.get('provider')
-        if provider == 'coingecko':
-            days = (end_date - start_alt_date).days
-            resp = requests.get(
-                f"https://api.coingecko.com/api/v3/coins/{asset}/market_chart",
-                params={'vs_currency': 'usd', 'days': days, 'interval': 'daily'},
-                timeout=10
-            )
+        start_ts = int(datetime.combine(start_alt_date, datetime.min.time()).timestamp())
+        end_ts   = int(datetime.combine(end_date,       datetime.min.time()).timestamp())
+        url = f"https://api.coingecko.com/api/v3/coins/{ticker}/market_chart/range"
+        params = {'vs_currency': 'usd', 'from': start_ts, 'to': end_ts}
+        for attempt in range(3):
+            resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                print(f"[WARN] 429 Too Many Requests (retry in {wait}s)")
+                time.sleep(wait)
+                continue
             resp.raise_for_status()
-            raw = resp.json().get('prices', [])
-            df  = pd.DataFrame(raw, columns=['timestamp', 'price'])
-            df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df = df.set_index('Date')['price'].resample('W-FRI').last().to_frame()
-            print(f"[TRACE] Alt-data fetched rows: {df.shape[0]}")
-        else:
-            print(f"[ERROR] Unsupported provider for {asset}: {provider}")
+            break
+        raw = resp.json().get('prices', [])
+        if not raw:
+            print(f"[WARN] {ticker}: empty list from API")
             return None
-
-        _summarize_df(df, f"{asset} ‑ weekly alt‑data")
-        filename = f"{asset.lower()}_{start_alt_str}_{end_str}.csv"
+        df = pd.DataFrame(raw, columns=['timestamp', 'price'])
+        df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.set_index('Date')['price'].resample('W-FRI').last().to_frame()
+        _summarize_df(df, f"{ticker} ‑ weekly on‑chain")
+        filename = f"{ticker.lower()}_{start_alt_str}_{end_str}.csv"
         save_df(df, 'alternative_data', filename)
         return df
     except Exception as err:
-        print(f"[ERROR] fetch_alternative_data error for {asset}: {err}")
+        print(f"[ERROR] _fetch_onchain error for {ticker}: {err}")
         return None
+
+
+def _fetch_alternative(endpoint: str) -> pd.DataFrame | None:
+    """외부 커스텀 API 지표 예시 (간단 대응)"""
+    try:
+        resp = requests.get(endpoint, timeout=15)
+        resp.raise_for_status()
+        df = pd.json_normalize(resp.json())
+        if df.empty:
+            print(f"[WARN] alternative: empty DataFrame from {endpoint}")
+            return None
+        df['Date'] = now_utc
+        df = df.set_index('Date')
+        _summarize_df(df, f"alternative ({endpoint})")
+        filename = f"alt_{start_alt_str}_{end_str}.csv"
+        save_df(df, 'alternative_data', filename)
+        return df
+    except Exception as err:
+        print(f"[ERROR] _fetch_alternative error: {err}")
+        return None
+
+# --- public dispatcher -------------------------------------------------------
+def fetch_metric(asset: str, conf: dict) -> pd.DataFrame | None:
+    """통합 지표 수집 엔트리 포인트"""
+    print(f"[STEP] 2. Fetching metric for {asset} (type={conf.get('type')})")
+    t = conf.get('type')
+    if t == 'fundamental':
+        return _fetch_fundamental(conf['ticker'])
+    if t == 'onchain':
+        return _fetch_onchain(conf['provider'], conf['ticker'])
+    if t == 'alternative':
+        return _fetch_alternative(conf['endpoint'])
+    print(f"[ERROR] Unknown metric type for {asset}: {t}")
+    return None
 
 # ──────────────────────────────────────────────────────────────
 # 5‑F. 거시경제 데이터
+#   (원본 유지 – ‘기간 유지’는 파일 삭제 로직으로 충족)
 # ──────────────────────────────────────────────────────────────
 def collect_macroeconomic():
     print("[STEP] 4. Starting macroeconomic data collection")
@@ -376,6 +413,8 @@ def collect_macroeconomic():
             first = df_raw['Date'].dt.date.min().strftime('%Y%m%d')
             last  = df_raw['Date'].dt.date.max().strftime('%Y%m%d')
             raw_name = f"{name.lower()}_{first}_{last}.csv"
+            for old in glob.glob(os.path.join(raw_folder, f"{name.lower()}_*.csv")):
+                os.remove(old)
             df_raw.to_csv(os.path.join(raw_folder, raw_name), index=False)
             series = df_raw.set_index('Date')['Value'].rename(name)
             if not series.empty:
@@ -384,7 +423,6 @@ def collect_macroeconomic():
         except Exception as err:
             print(f"[ERROR] Failed macro fetch for {name}: {err}")
 
-    # 병합 및 최종 저장
     try:
         if not records:
             print("[WARN] No macro records collected (nothing to save)")
@@ -407,7 +445,7 @@ if __name__ == '__main__':
     print("════════════════════════════════════════════════════")
 
     try:
-        # ─ 1) 주식/ETF/원자재/외환
+        # 1) 주식·ETF·원자재·외환
         for category in ['stocks_etfs', 'commodities', 'forex']:
             tickers = ASSET_TICKERS.get(category, [])
             print(f"[GROUP] Processing {category} (tickers={tickers})")
@@ -418,11 +456,10 @@ if __name__ == '__main__':
                 else:
                     print(f"[INFO] Skip technical‑indicators for {ticker} (no price data)")
 
-        # ─ 2) 채권
+        # 2) 채권
         tickers = ASSET_TICKERS.get('bonds', [])
         print(f"[GROUP] Processing bonds (tickers={tickers})")
         for ticker in tickers:
-            print(f"[DEBUG] Fetching bond data for {ticker}")
             try:
                 load_dotenv()
                 fred_api_key = os.getenv("FRED_API_KEY")
@@ -442,19 +479,13 @@ if __name__ == '__main__':
             except Exception as err:
                 print(f"[ERROR] Bond fetch failed for {ticker}: {err}")
 
-        # ─ 3) 재무 지표
-        if FUNDAMENTALS_TICKERS:
-            print(f"[GROUP] Processing fundamentals (tickers={FUNDAMENTALS_TICKERS})")
-        for ticker in FUNDAMENTALS_TICKERS:
-            fetch_fundamentals(ticker)
+        # 3) 재무지표/온체인지표/그외지표
+        if QUANT_ASSETS:
+            print(f"[GROUP] Processing QUANT metrics ({list(QUANT_ASSETS.keys())})")
+        for asset, conf in QUANT_ASSETS.items():
+            fetch_metric(asset, conf)
 
-        # ─ 4) 대체 자산
-        if ALT_ASSETS:
-            print(f"[GROUP] Processing alternative assets ({list(ALT_ASSETS.keys())})")
-        for asset, conf in ALT_ASSETS.items():
-            fetch_alternative_data(asset, conf)
-
-        # ─ 5) 거시경제
+        # 5) 거시경제
         collect_macroeconomic()
 
     except Exception as err:
