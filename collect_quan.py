@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────
-# ① 필수 라이브러리 임포트 및 공통 설정
+#  필수 라이브러리 임포트 및 공통 설정
 # ──────────────────────────────────────────────────────────────
 import os, glob, re, warnings, requests, shutil, io, zipfile, time
 from datetime import datetime, timedelta, timezone
@@ -20,7 +20,7 @@ load_dotenv()
 print("[BOOT] .env loaded")
 
 # ──────────────────────────────────────────────────────────────
-# ② 날짜·범위 상수 정의
+#  날짜·범위 상수 정의
 # ──────────────────────────────────────────────────────────────
 FMT_DATE  = '%Y%m%d'
 DAY1      = timedelta(days=1)
@@ -34,21 +34,15 @@ START_MACRO = today - timedelta(days=365 * 10)
 print(f"[BOOT] Date ranges  OHLCV:{START_OHLCV}  EXTRA:{START_EXTRA}  MACRO:{START_MACRO}")
 
 # ──────────────────────────────────────────────────────────────
-# ③ API 키 로드 및 보조 상수
+#  API 키 로드 및 보조 상수
 # ──────────────────────────────────────────────────────────────
 FRED_KEY    = os.getenv('FRED_API_KEY')
 EIA_KEY     = os.getenv('EIA_API_KEY')
 FINNHUB_KEY = os.getenv('FINNHUB_API_KEY')
 print("[BOOT] API keys read")
 
-_COT_FRED_MAP = {  # FRED 대체 코드(통화별 COT)
-    'EUR': 'MSPBBM027EUR',
-    'GBP': 'MSPBBM027GBM',
-    'USD': 'MSPBBM027USM'
-}
-
 # ──────────────────────────────────────────────────────────────
-# ④ 대상 자산 및 플래그
+#  대상 자산 및 플래그
 # ──────────────────────────────────────────────────────────────
 TARGET_ASSETS = {
     'equity':    ['TSLA'],
@@ -68,7 +62,7 @@ print(f"[BOOT] TARGET_ASSETS → {TARGET_ASSETS}")
 print(f"[BOOT] EXTRA_METRICS → {EXTRA_METRICS}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑤ 거시 지표 코드 사전
+#  거시 지표 코드 사전
 # ──────────────────────────────────────────────────────────────
 MACRO_INDICATORS = {
     "Industrial_Production":         dict(src='FRED', code='INDPRO'),
@@ -85,7 +79,7 @@ MACRO_INDICATORS = {
     "Initial_Jobless_Claims":        dict(src='FRED', code='ICSA'),
     "Consumer_Confidence":           dict(src='FRED', code='UMCSENT'),
     "Retail_Sales":                  dict(src='FRED', code='RSAFS'),
-    "Federal_Funds_Rate":            dict(src='FRED', code='FEDFUNDS'),
+    "Federal_Funds_Rate":            dict(src='FRED', code='DFEDTARU'),
     "Treasury_10Y":                  dict(src='FRED', code='DGS10'),
     "Treasury_2Y":                   dict(src='FRED', code='DGS2'),
     "Yield_Spread":                  dict(src='FRED', code='T10Y2Y'),
@@ -102,15 +96,15 @@ YIELD_CODES   = {'1M':'DGS1MO','3M':'DGS3MO','6M':'DGS6MO','1Y':'DGS1',
 BREAKEVEN_10Y = 'T10YIE'
 MOVE_SYMBOL   = '^MOVE'
 FX_POLICY_CODES = {
-    'USD':'FEDFUNDS',
+    'USD':'DFEDTARU',
     'EUR':'ECBDFR',
-    'GBP':'IRSTCI01GBM156N',
+    'GBP':'IUDSOIA',
     'JPY':'JORGCBDI01JPM',
     'KRW':'SBKRLR'
 }
 
 # ──────────────────────────────────────────────────────────────
-# ⑥ 저장 폴더 생성
+#  저장 폴더 생성
 # ──────────────────────────────────────────────────────────────
 print("[BOOT] Preparing directory tree")
 BASE_DIR = os.path.join(os.getcwd(), 'quant_collects')
@@ -129,22 +123,25 @@ for c,p in CATS.items():
     print(f"[DIR] {c:<12s} → {os.path.join(BASE_DIR, p)}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑦ 캐시 초기화
+#  캐시 초기화
 # ──────────────────────────────────────────────────────────────
 print("[BOOT] Initialising caches")
-FRED_CACHE, YF_PRICE_CACHE, YF_INFO_CACHE, DBN_CACHE = {}, {}, {}, {}
+FRED_CACHE, YF_PRICE_CACHE, YF_INFO_CACHE, DBN_CACHE, CIK_CACHE = {}, {}, {}, {}, {}
 
 # ──────────────────────────────────────────────────────────────
-# ⑧ HTTP 세션 및 재시도 헬퍼
+#  HTTP 세션 및 재시도 헬퍼
 # ──────────────────────────────────────────────────────────────
 print("[BOOT] Setting HTTP session")
 _SES = requests.Session()
-_SES.headers.update({'User-Agent':'Mozilla/5.0 QuantCollector/1.6'})
+_SES.headers.update({'User-Agent':'Mozilla/5.0 QuantCollector/1.9'})
 
 def _http_get(url:str, label:str, params:Dict[str,Any]=None,
-              retries:int=3, timeout:int=20) -> Optional[requests.Response]:
+              retries:int=3, timeout:int=25, sec:bool=False) -> Optional[requests.Response]:
     for i in range(1, retries+1):
         try:
+            if sec:
+                _SES.headers.update({'User-Agent':
+                    'QuantCollector (+https://github.com/user/project; contact: user@example.com)'})
             print(f"[HTTP] GET → {label} (try {i}/{retries})")
             r = _SES.get(url, params=params, timeout=timeout)
             r.raise_for_status()
@@ -159,7 +156,7 @@ def _http_get(url:str, label:str, params:Dict[str,Any]=None,
     return None
 
 # ──────────────────────────────────────────────────────────────
-# ⑨ 파일·날짜 유틸
+#  파일·날짜 유틸
 # ──────────────────────────────────────────────────────────────
 def _latest_file(prefix:str, cat:str)->Optional[str]:
     try:
@@ -224,8 +221,8 @@ def _merge_save(df_new:pd.DataFrame, cat:str, prefix:str)->pd.DataFrame:
 
             df = pd.concat([df_prev, df_new]).sort_index()
             df = df.loc[~df.index.duplicated(keep='last')]
-            if df_new.shape[0] < 3 and df_prev.shape[0] > 0:
-                print(f"[WARN] {prefix}: new rows <3 → skip overwrite")
+            if cat != 'valuations' and df_new.shape[0] == 0 and df_prev.shape[0] > 0:
+                print(f"[INFO] {prefix}: no new rows → skip overwrite")
                 return df_prev
         else:
             df = df_new
@@ -247,7 +244,7 @@ def _merge_save(df_new:pd.DataFrame, cat:str, prefix:str)->pd.DataFrame:
         return df_new
 
 # ──────────────────────────────────────────────────────────────
-# ⑩ FRED / DBnomics 래퍼
+#  FRED / DBnomics 래퍼
 # ──────────────────────────────────────────────────────────────
 def _fred_series(fred:Fred, code:str, start:datetime.date, end:datetime.date)->pd.Series:
     print(f"[FRED] fetch start → {code}")
@@ -283,7 +280,49 @@ def _dbn_series(p:str,d:str,s:str)->pd.Series:
         return pd.Series(dtype=float)
 
 # ──────────────────────────────────────────────────────────────
-# ⑪ 가격 수집·기술적 지표
+#  SEC Company‑facts 헬퍼
+# ──────────────────────────────────────────────────────────────
+def _get_cik(tkr: str) -> Optional[str]:
+    if tkr in CIK_CACHE:
+        return CIK_CACHE[tkr]
+    try:
+        info = YF_INFO_CACHE.get(tkr) or yf.Ticker(tkr).info
+        YF_INFO_CACHE[tkr] = info
+        cik = str(info.get('cik')) if info.get('cik') else None
+        if cik:
+            CIK_CACHE[tkr] = cik.zfill(10)
+        return CIK_CACHE.get(tkr)
+    except Exception as e:
+        print(f"[WARN] get_cik {tkr}: {e}")
+        return None
+
+def _sec_company_facts(cik: str) -> pd.DataFrame:
+    print(f"[SEC] company facts → {cik}")
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    r = _http_get(url, f"SEC facts {cik}", sec=True)
+    if not r:
+        return pd.DataFrame()
+    try:
+        js = r.json()
+        rows = []
+        facts = js.get('facts', {}).get('us-gaap', {})
+        for tag, tinfo in facts.items():
+            for unit, arr in tinfo.get('units', {}).items():
+                for itm in arr:
+                    if 'end' in itm and 'val' in itm:
+                        rows.append({'Date': itm['end'], 'Tag': tag,
+                                     'Unit': unit, 'Value': itm['val']})
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df['Date'] = pd.to_datetime(df['Date'])
+        return df.pivot_table(values='Value', index='Date', columns='Tag', aggfunc='first')
+    except Exception as e:
+        print(f"[WARN] SEC facts parse {cik}: {e}")
+        return pd.DataFrame()
+
+# ──────────────────────────────────────────────────────────────
+#  가격 수집·기술적 지표
 # ──────────────────────────────────────────────────────────────
 def collect_price(tkr:str)->Optional[pd.DataFrame]:
     print(f"[TASK] collect_price → {tkr}")
@@ -356,7 +395,7 @@ def calc_technicals(df:pd.DataFrame, tkr:str):
         print(f"[ERROR] calc_technicals {tkr}: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑫ 주식 추가 지표
+#  주식 추가 지표
 # ──────────────────────────────────────────────────────────────
 def equity_financials(tkr:str):
     print(f"[TASK] equity_financials → {tkr}")
@@ -364,6 +403,16 @@ def equity_financials(tkr:str):
         yf_obj = yf.Ticker(tkr)
         q, y = yf_obj.quarterly_financials.T, yf_obj.financials.T
         print(f"[FIN] quarterly rows={q.shape[0]}  yearly rows={y.shape[0]}")
+        def _needs_fallback(df:pd.DataFrame)->bool:
+            if df.empty: return True
+            return any(df[col].isna().mean() > 0.25 for col in df.columns)
+        if _needs_fallback(q) or _needs_fallback(y):
+            print("[FIN] yfinance 부족 → SEC XBRL 보강")
+            cik = _get_cik(tkr)
+            if cik:
+                df_sec = _sec_company_facts(cik)
+                if not df_sec.empty:
+                    _merge_save(df_sec,'fundamentals',f"{tkr.lower()}_sec")
         if not q.empty:
             _merge_save(q,'fundamentals',f"{tkr.lower()}_qf")
         if not y.empty:
@@ -419,7 +468,7 @@ def _finnhub_consensus(tkr:str) -> pd.DataFrame:
     return df
 
 # ──────────────────────────────────────────────────────────────
-# ⑬ 채권·금리
+#  채권·금리
 # ──────────────────────────────────────────────────────────────
 def collect_yield_curve(fred:Fred):
     print("[TASK] collect_yield_curve")
@@ -462,7 +511,7 @@ def collect_move():
         print(f"[ERROR] collect_move: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑭ 암호화폐 온체인 + 파생상품
+#  암호화폐 온체인 + 파생상품
 # ──────────────────────────────────────────────────────────────
 def crypto_onchain(asset:str):
     print(f"[TASK] crypto_onchain → {asset}")
@@ -520,7 +569,7 @@ def crypto_derivatives(asset:str):
         print(f"[ERROR] crypto_derivatives {asset}: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑮ 원자재 지표
+#  원자재 지표
 # ──────────────────────────────────────────────────────────────
 _MONTH_CODE = {1:'F',2:'G',3:'H',4:'J',5:'K',6:'M',7:'N',8:'Q',9:'U',10:'V',11:'X',12:'Z'}
 
@@ -573,29 +622,17 @@ def commodity_term_structure(ticker:str):
         print(f"[ERROR] commodity_term_structure {ticker}: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑯ 외환 지표
+#  외환 지표
 # ──────────────────────────────────────────────────────────────
-_PRE_DATASET     = "6dca-aqww"
+_PRE_DATASET     = "kh3c-gbw2"
 _PRE_BASE_URL    = f"https://publicreporting.cftc.gov/resource/{_PRE_DATASET}.json"
 _PRE_PAGE_LIMIT  = 50000
-_COT_NUM_COLS    = ['noncomm_positions_long_all',
-                    'noncomm_positions_short_all',
-                    'open_interest_all']
+_COT_NUM_COLS    = ['asset_mgr_long_oi','asset_mgr_short_oi','open_interest_all']
 
 COT_CONTRACTS = {
-    "USD": [
-        "U.S. Dollar Index - ICE FUTURES U.S.",
-        "U.S. Dollar Index - ICE",
-        "Dollar Index - ICE FUTURES U.S."
-    ],
-    "EUR": [
-        "Euro FX - CHICAGO MERCANTILE EXCHANGE",
-        "Euro FX"
-    ],
-    "GBP": [
-        "British Pound Sterling - CHICAGO MERCANTILE EXCHANGE",
-        "British Pound"
-    ]
+    "USD": ["U.S. Dollar Index - ICE"],
+    "EUR": ["Euro FX - CHICAGO MERCANTILE EXCHANGE","Euro FX"],
+    "GBP": ["British Pound Sterling - CHICAGO MERCANTILE EXCHANGE","British Pound"]
 }
 
 _COT_HIST_BASE = "https://www.cftc.gov/files/dea/history"
@@ -605,14 +642,15 @@ def _cot_pre_fetch_v2(ccy:str)->pd.DataFrame:
     sel = "report_date_as_yyyy_mm_dd,market_and_exchange_names," \
           + ",".join(_COT_NUM_COLS)
     for name in aliases:
+        safe = name.replace("'", "''")
         prm = {
             "$select": sel,
             "$order":  "report_date_as_yyyy_mm_dd",
             "$limit":  _PRE_PAGE_LIMIT,
-            "market_and_exchange_names": name
+            "$where":  f"market_and_exchange_names='{safe}'"
         }
         r = _http_get(_PRE_BASE_URL, f"PRE {name}", prm)
-        if not r: 
+        if not r:
             continue
         js = r.json()
         if js:
@@ -621,9 +659,8 @@ def _cot_pre_fetch_v2(ccy:str)->pd.DataFrame:
                 for c in _COT_NUM_COLS:
                     df[c] = pd.to_numeric(df[c], errors='coerce')
                 df['Date'] = pd.to_datetime(df['report_date_as_yyyy_mm_dd'])
-                df['NonComm_Net'] = df['noncomm_positions_long_all'] \
-                                    - df['noncomm_positions_short_all']
-                return df.set_index('Date')[['NonComm_Net','open_interest_all']]
+                df['AssetMgr_Net'] = df['asset_mgr_long_oi'] - df['asset_mgr_short_oi']
+                return df.set_index('Date')[['AssetMgr_Net','open_interest_all']]
     return pd.DataFrame()
 
 def _cot_hist_fetch(ccy:str)->pd.DataFrame:
@@ -632,7 +669,7 @@ def _cot_hist_fetch(ccy:str)->pd.DataFrame:
     for yr in range(START_MACRO.year, today.year + 1):
         url = f"{_COT_HIST_BASE}/fut_fin_txt_{yr}.zip"
         r = _http_get(url, f"histZIP {yr}")
-        if not r: 
+        if not r:
             continue
         try:
             zf = zipfile.ZipFile(io.BytesIO(r.content))
@@ -640,8 +677,6 @@ def _cot_hist_fetch(ccy:str)->pd.DataFrame:
             with zf.open(fname) as f:
                 dft = pd.read_csv(f, delimiter=',')
             dft.columns = [c.strip().lower() for c in dft.columns]
-            if 'market_and_exchange_names' not in dft.columns:
-                continue
             mask = dft['market_and_exchange_names'].str.contains(
                 '|'.join([re.escape(a) for a in COT_CONTRACTS.get(ccy.upper(),[])]),
                 case=False, regex=True
@@ -649,16 +684,18 @@ def _cot_hist_fetch(ccy:str)->pd.DataFrame:
             dft = dft.loc[mask]
             if dft.empty:
                 continue
-            dft['date'] = pd.to_datetime(dft['as_of_date_in_form_yyyymmdd'].astype(str))
-            dft['NonComm_Net'] = dft['noncomm_positions_long_all'] \
-                                 - dft['noncomm_positions_short_all']
-            dfs.append(dft[['date','NonComm_Net','open_interest_all']])
+            date_cols = [c for c in ['as_of_week_ending','as_of_date_in_form_yyyymmdd'] if c in dft.columns]
+            if not date_cols:
+                continue
+            date_col = date_cols[0]
+            dft['date'] = pd.to_datetime(dft[date_col].astype(str))
+            dft['AssetMgr_Net'] = dft['asset_mgr_long_oi'] - dft['asset_mgr_short_oi']
+            dfs.append(dft[['date','AssetMgr_Net','open_interest_all']])
         except Exception as e:
             print(f"[WARN] histZIP {yr}: {e}")
     if dfs:
         df_all = pd.concat(dfs).dropna()
-        df_all = df_all.sort_values('date').set_index('date')
-        return df_all
+        return df_all.sort_values('date').set_index('date')
     return pd.DataFrame()
 
 def fx_cot_position(ccy:str):
@@ -676,18 +713,10 @@ def fx_cot_position(ccy:str):
             print(f"[COT] histZIP rows → {df.shape[0]}")
             return
 
-        fred_code = _COT_FRED_MAP.get(ccy.upper())
-        if fred_code and 'FRED_CLIENT' in globals():
-            s = _fred_series(FRED_CLIENT, fred_code, START_MACRO, today - DAY1)
-            if not s.empty:
-                _merge_save(s.to_frame(),'cot',f"cot_{ccy.lower()}")
-                print(f"[COT] FRED rows → {s.shape[0]}")
-                return
-
         print(f"[SKIP] COT {ccy} data unavailable")
     except Exception as e:
         print(f"[ERROR] fx_cot_position {ccy}: {e}")
-        
+
 def fx_policy_rate(fred:Fred, ccy:str):
     print(f"[TASK] fx_policy_rate → {ccy}")
     code = FX_POLICY_CODES.get(ccy.upper())
@@ -696,13 +725,21 @@ def fx_policy_rate(fred:Fred, ccy:str):
         return
     try:
         s = _fred_series(fred, code, START_MACRO, today - DAY1).rename(f"{ccy}_PolicyRate")
-        if not s.empty:
-            _merge_save(s.to_frame(),'policy_rate',f"policy_{ccy.lower()}")
+        if s.empty:
+            print(f"[WARN] policy rate {ccy} empty")
+            return
+        if len(s) > 5:
+            freq_days = (s.index[-1] - s.index[-2]).days
+            allowed = freq_days * 2.5
+            age_days = (today - s.index.max().date()).days
+            if age_days > allowed:
+                print(f"[WARN] {ccy} policy rate stale ({age_days} days > {allowed:.0f})")
+        _merge_save(s.to_frame(),'policy_rate',f"policy_{ccy.lower()}")
     except Exception as e:
         print(f"[ERROR] fx_policy_rate {ccy}: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑰ 거시경제 지표
+#  거시경제 지표
 # ──────────────────────────────────────────────────────────────
 def collect_macro(fred:Fred):
     print("[TASK] collect_macro")
@@ -730,10 +767,10 @@ def collect_macro(fred:Fred):
         print(f"[ERROR] collect_macro merge: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# ⑱ 메인 함수
+#  메인 함수
 # ──────────────────────────────────────────────────────────────
 def main():
-    print("════════ Quant‑data collection v5.0 ════════")
+    print("════════ Quant‑data collection v5.4 ════════")
     if not FRED_KEY:
         print("[FATAL] FRED_API_KEY missing – abort")
         return
@@ -809,7 +846,7 @@ def main():
     print("════════ collection finished ════════")
 
 # ──────────────────────────────────────────────────────────────
-# ⑲ 진입점
+#  진입점
 # ──────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     try:
